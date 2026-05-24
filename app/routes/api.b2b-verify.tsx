@@ -457,13 +457,15 @@ async function createCompanyForApprovedCustomer({
         company: {
           name: companyName,
         },
-        companyLocation: {
-          name: companyName,
-          billingAddress: {
-            recipient: companyName,
-            countryCode: billingValidation.billingCountry || vies.countryCode || "IT",
-          },
-        },
+companyLocation: {
+  name: companyName,
+  billingAddress: {
+    recipient: companyName,
+    address1: String(vies.address || "Address from VIES").split("\n")[0] || "Address from VIES",
+    city: "N/A",
+    countryCode: billingValidation.billingCountry || vies.countryCode || "IT",
+  },
+},
       },
     },
   );
