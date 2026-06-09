@@ -620,17 +620,23 @@ async function upsertCustomerAndWriteData({
 
   let company = null;
 
-  if (decision === "approved") {
-    customer = await findCustomerByEmail(admin, payload.email);
+if (decision === "approved") {
+  const refreshedCustomer = await findCustomerByEmail(admin, payload.email);
 
-    company = await createCompanyForApprovedCustomer({
-      admin,
-      customer,
-      payload,
-      vies,
-      billingValidation,
-    });
+  customer = refreshedCustomer || customer;
+
+  if (!customer?.id) {
+    throw new Error("Approved customer was not found after creation/update.");
   }
+
+  company = await createCompanyForApprovedCustomer({
+    admin,
+    customer,
+    payload,
+    vies,
+    billingValidation,
+  });
+}
 
   return {
     customer,
