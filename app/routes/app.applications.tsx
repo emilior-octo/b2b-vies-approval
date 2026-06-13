@@ -22,9 +22,10 @@ function statusLabel(status: string) {
 export default function ApplicationsPage() {
   const { applications } = useLoaderData<typeof loader>();
 
-  function openApplication(id: string) {
-    window.location.assign(`/app/applications/${id}`);
-  }
+function openApplication(id: string) {
+  const currentSearch = window.location.search || "";
+  window.location.assign(`/app/applications/${id}${currentSearch}`);
+}
 
   return (
     <div style={{ padding: 24 }}>
