@@ -1,4 +1,4 @@
-import { Link, useLoaderData } from "react-router";
+import { useLoaderData } from "react-router";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
 
@@ -21,6 +21,10 @@ function statusLabel(status: string) {
 
 export default function ApplicationsPage() {
   const { applications } = useLoaderData<typeof loader>();
+
+  function openApplication(id: string) {
+    window.location.assign(`/app/applications/${id}`);
+  }
 
   return (
     <div style={{ padding: 24 }}>
@@ -46,20 +50,29 @@ export default function ApplicationsPage() {
 
           <tbody>
             {applications.map((app) => (
-              <tr key={app.id}>
+              <tr
+                key={app.id}
+                onClick={() => openApplication(app.id)}
+                style={{ cursor: "pointer" }}
+              >
                 <td style={td}>{statusLabel(app.status)}</td>
                 <td style={td}>
-                  <Link to={`/app/applications/${app.id}`}>
+                  <button
+                    type="button"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      openApplication(app.id);
+                    }}
+                    style={linkButton}
+                  >
                     {app.companyNameSubmitted || "-"}
-                  </Link>
+                  </button>
                 </td>
                 <td style={td}>{app.vatNumberSubmitted}</td>
                 <td style={td}>{app.email}</td>
                 <td style={td}>{app.matchScore ?? "-"}%</td>
                 <td style={td}>{app.viesValid ? "Valid" : "Invalid"}</td>
-                <td style={td}>
-                  {new Date(app.createdAt).toLocaleString()}
-                </td>
+                <td style={td}>{new Date(app.createdAt).toLocaleString()}</td>
               </tr>
             ))}
 
@@ -87,4 +100,14 @@ const th: React.CSSProperties = {
 const td: React.CSSProperties = {
   padding: "12px",
   borderBottom: "1px solid #eee",
+};
+
+const linkButton: React.CSSProperties = {
+  background: "none",
+  border: 0,
+  color: "#005bd3",
+  padding: 0,
+  textDecoration: "underline",
+  cursor: "pointer",
+  font: "inherit",
 };
