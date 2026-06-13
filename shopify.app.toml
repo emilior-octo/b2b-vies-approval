@@ -1,6 +1,6 @@
 client_id = "55fc4b9bda2c09e3278bd014bf6447af"
 name = "b2b-vies-approval"
-application_url = "https://b2b-vies-approval.onrender.com"
+application_url = "https://vies-approval-form.onrender.com"
 embedded = true
 
 [build]
@@ -20,4 +20,4 @@ api_version = "2026-07"
 [access_scopes]
 scopes = "read_customers,write_customers,read_companies,write_companies"
 [auth]
-redirect_urls = [ "https://b2b-vies-approval.onrender.com/api/auth" ]
+redirect_urls = [ "https://vies-approval-form.onrender.com/api/auth" ]

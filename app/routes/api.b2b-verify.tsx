@@ -1,3 +1,4 @@
+import db from "../db.server";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import soap from "soap";
 import { unauthenticated } from "../shopify.server";
@@ -457,15 +458,20 @@ async function createCompanyForApprovedCustomer({
         company: {
           name: companyName,
         },
-companyLocation: {
-  name: companyName,
-  billingAddress: {
-    recipient: companyName,
-    address1: String(vies.address || "Address from VIES").split("\n")[0] || "Address from VIES",
-    city: "N/A",
-    countryCode: billingValidation.billingCountry || vies.countryCode || "IT",
-  },
-},
+        companyLocation: {
+          name: companyName,
+          taxRegistrationId: normalizeVat(vies.vatNumber || payload.vatNumber),
+          taxExempt: false,
+          billingAddress: {
+            recipient: companyName,
+            address1:
+              String(vies.address || "Address from VIES").split("\n")[0] ||
+              "Address from VIES",
+            city: "N/A",
+            countryCode:
+              billingValidation.billingCountry || vies.countryCode || "IT",
+          },
+        },
       },
     },
   );
@@ -620,23 +626,23 @@ async function upsertCustomerAndWriteData({
 
   let company = null;
 
-if (decision === "approved") {
-  const refreshedCustomer = await findCustomerByEmail(admin, payload.email);
+  if (decision === "approved") {
+    const refreshedCustomer = await findCustomerByEmail(admin, payload.email);
 
-  customer = refreshedCustomer || customer;
+    customer = refreshedCustomer || customer;
 
-  if (!customer?.id) {
-    throw new Error("Approved customer was not found after creation/update.");
+    if (!customer?.id) {
+      throw new Error("Approved customer was not found after creation/update.");
+    }
+
+    company = await createCompanyForApprovedCustomer({
+      admin,
+      customer,
+      payload,
+      vies,
+      billingValidation,
+    });
   }
-
-  company = await createCompanyForApprovedCustomer({
-    admin,
-    customer,
-    payload,
-    vies,
-    billingValidation,
-  });
-}
 
   return {
     customer,
@@ -710,6 +716,8 @@ export async function action({ request }: ActionFunctionArgs) {
     );
   }
 
+  let b2bApplication: any = null;
+
   try {
     const vies = await checkVatVies(vatNumber);
 
@@ -746,6 +754,29 @@ export async function action({ request }: ActionFunctionArgs) {
       "b2b.billing_country": billingValidation.billingCountry,
     };
 
+    b2bApplication = await db.b2BApplication.create({
+      data: {
+        shop,
+        status: decision,
+        email,
+        firstName: payload.firstName || null,
+        lastName: payload.lastName || null,
+        companyNameSubmitted: submittedCompanyName,
+        vatNumberSubmitted: normalizeVat(vatNumber),
+        billingCountry: billingValidation.billingCountry,
+        pec: billingValidation.pec || null,
+        codiceDestinatario: billingValidation.codiceDestinatario || null,
+        viesValid: vies.valid,
+        viesCompanyName: vies.companyName,
+        viesAddress: vies.address,
+        viesCountryCode: vies.countryCode,
+        viesVatNumber: vies.vatNumber,
+        matchScore,
+        approvedAt: decision === "approved" ? new Date() : null,
+        rejectedAt: decision === "rejected" ? new Date() : null,
+      },
+    });
+
     const shopifyWrite = await upsertCustomerAndWriteData({
       shop,
       payload,
@@ -756,8 +787,19 @@ export async function action({ request }: ActionFunctionArgs) {
       billingValidation,
     });
 
+    await db.b2BApplication.update({
+      where: { id: b2bApplication.id },
+      data: {
+        shopifyCustomerId: shopifyWrite.customer?.id || null,
+        shopifyCompanyId: shopifyWrite.company?.companyId || null,
+        shopifyCompanyLocationId:
+          shopifyWrite.company?.companyLocationId || null,
+      },
+    });
+
     return json({
       ok: true,
+      applicationId: b2bApplication.id,
       decision,
       matchScore,
       tagsToApply,
@@ -779,10 +821,21 @@ export async function action({ request }: ActionFunctionArgs) {
       },
     });
   } catch (error: any) {
+    if (b2bApplication?.id) {
+      await db.b2BApplication.update({
+        where: { id: b2bApplication.id },
+        data: {
+          status: "pending_review",
+          reviewNotes: error?.message || "Errore imprevisto.",
+        },
+      });
+    }
+
     return json(
       {
         ok: false,
         decision: "pending_review",
+        applicationId: b2bApplication?.id || null,
         error: error?.message || "Errore imprevisto.",
       },
       { status: 500 },

@@ -32,3 +32,44 @@ model Session {
   refreshToken        String?
   refreshTokenExpires DateTime?
 }
+
+model B2BApplication {
+  id String @id @default(cuid())
+
+  shop String
+  status String @default("pending_review")
+
+  email String
+  firstName String?
+  lastName String?
+
+  companyNameSubmitted String
+  vatNumberSubmitted String
+  billingCountry String?
+
+  pec String?
+  codiceDestinatario String?
+
+  viesValid Boolean?
+  viesCompanyName String?
+  viesAddress String?
+  viesCountryCode String?
+  viesVatNumber String?
+
+  matchScore Int?
+
+  shopifyCustomerId String?
+  shopifyCompanyId String?
+  shopifyCompanyLocationId String?
+
+  reviewNotes String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  approvedAt DateTime?
+  rejectedAt DateTime?
+
+  @@index([shop])
+  @@index([email])
+  @@index([status])
+}
