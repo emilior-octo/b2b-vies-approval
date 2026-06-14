@@ -1,4 +1,4 @@
-import { useLoaderData, useLocation, useNavigate } from "react-router";
+import { useLoaderData, useLocation } from "react-router";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
 
@@ -21,11 +21,10 @@ function statusLabel(status: string) {
 
 export default function ApplicationsPage() {
   const { applications } = useLoaderData<typeof loader>();
-  const navigate = useNavigate();
   const location = useLocation();
 
-  function openApplication(id: string) {
-    navigate(`/app/applications/${id}${location.search || ""}`);
+  function detailUrl(id: string) {
+    return `/app/applications/${id}${location.search || ""}`;
   }
 
   return (
@@ -47,40 +46,31 @@ export default function ApplicationsPage() {
               <th style={th}>Match</th>
               <th style={th}>VIES</th>
               <th style={th}>Created</th>
+              <th style={th}>Action</th>
             </tr>
           </thead>
 
           <tbody>
             {applications.map((app) => (
-              <tr
-                key={app.id}
-                onClick={() => openApplication(app.id)}
-                style={{ cursor: "pointer" }}
-              >
+              <tr key={app.id}>
                 <td style={td}>{statusLabel(app.status)}</td>
-                <td style={td}>
-                  <button
-                    type="button"
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      openApplication(app.id);
-                    }}
-                    style={linkButton}
-                  >
-                    {app.companyNameSubmitted || "-"}
-                  </button>
-                </td>
+                <td style={td}>{app.companyNameSubmitted || "-"}</td>
                 <td style={td}>{app.vatNumberSubmitted}</td>
                 <td style={td}>{app.email}</td>
                 <td style={td}>{app.matchScore ?? "-"}%</td>
                 <td style={td}>{app.viesValid ? "Valid" : "Invalid"}</td>
                 <td style={td}>{new Date(app.createdAt).toLocaleString()}</td>
+                <td style={td}>
+                  <a href={detailUrl(app.id)} style={buttonLink}>
+                    Open
+                  </a>
+                </td>
               </tr>
             ))}
 
             {!applications.length && (
               <tr>
-                <td style={td} colSpan={7}>
+                <td style={td} colSpan={8}>
                   No B2B applications yet.
                 </td>
               </tr>
@@ -104,12 +94,15 @@ const td: React.CSSProperties = {
   borderBottom: "1px solid #eee",
 };
 
-const linkButton: React.CSSProperties = {
-  background: "none",
-  border: 0,
-  color: "#005bd3",
-  padding: 0,
-  textDecoration: "underline",
-  cursor: "pointer",
-  font: "inherit",
+const buttonLink: React.CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  minHeight: 34,
+  padding: "0 14px",
+  borderRadius: 999,
+  background: "#303a21",
+  color: "white",
+  textDecoration: "none",
+  fontWeight: 700,
 };
