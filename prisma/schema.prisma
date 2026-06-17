@@ -73,3 +73,47 @@ model B2BApplication {
   @@index([email])
   @@index([status])
 }
+
+model InvoiceRequest {
+  id String @id @default(cuid())
+
+  shop String
+
+  customerId String?
+  orderId String?
+  orderName String?
+
+  cartToken String?
+  checkoutToken String?
+
+  invoiceType String
+
+  email String?
+  firstName String?
+  lastName String?
+
+  companyName String?
+  vatNumber String?
+  billingCountry String?
+
+  pec String?
+  codiceDestinatario String?
+
+  viesChecked Boolean? @default(false)
+  viesValid Boolean?
+  viesCompanyName String?
+  viesAddress String?
+
+  reverseCharge Boolean? @default(false)
+  taxExemptApplied Boolean? @default(false)
+
+  status String @default("registered")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([shop])
+  @@index([email])
+  @@index([status])
+  @@index([cartToken])
+}
