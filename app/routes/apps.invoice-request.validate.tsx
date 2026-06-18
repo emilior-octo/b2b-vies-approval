@@ -58,10 +58,18 @@ async function createOrPrepareTaxExemptCustomer({
   shop,
   email,
   companyName,
+  vatNumber,
+  countryCode,
+  viesCompanyName,
+  viesAddress,
 }: {
   shop: string;
   email: string;
   companyName?: string;
+  vatNumber?: string;
+  countryCode?: string;
+  viesCompanyName?: string;
+  viesAddress?: string;
 }) {
   if (!email) return null;
 
@@ -92,8 +100,9 @@ async function createOrPrepareTaxExemptCustomer({
           email,
           firstName: "Invoice",
           lastName: "Customer",
-          note: `Invoice request reverse charge - ${companyName || ""}`,
+          note: `Invoice request reverse charge - ${companyName || viesCompanyName || ""}`,
           tags: ["invoice_request", "reverse_charge_customer"],
+          taxExempt: true,
         },
       },
     );
@@ -139,7 +148,71 @@ async function createOrPrepareTaxExemptCustomer({
     throw new Error(errors.map((e: any) => e.message).join(" | "));
   }
 
-  return updateData?.data?.customerUpdate?.customer || customer;
+  const updatedCustomer =
+    updateData?.data?.customerUpdate?.customer || customer;
+
+  await setCustomerMetafields(admin, updatedCustomer.id, {
+    "b2b.vat_number": normalizeVat(vatNumber || ""),
+    "b2b.billing_country": normalizeCountry(countryCode || ""),
+    "b2b.vies_company_name": viesCompanyName || "",
+    "b2b.vies_address": viesAddress || "",
+    "b2b.reverse_charge": "true",
+  });
+
+  return updatedCustomer;
+}
+
+async function setCustomerMetafields(
+  admin: any,
+  customerId: string,
+  metafieldsToWrite: Record<string, string>,
+) {
+  const metafields = Object.entries(metafieldsToWrite)
+    .filter(([, value]) => String(value ?? "").trim() !== "")
+    .map(([fullKey, value]) => {
+      const [namespace, key] = fullKey.split(".");
+
+      return {
+        ownerId: customerId,
+        namespace,
+        key,
+        type:
+          key === "vies_address"
+            ? "multi_line_text_field"
+            : "single_line_text_field",
+        value: String(value ?? "").trim(),
+      };
+    });
+
+  if (!metafields.length) return [];
+
+  const data = await graphQL(
+    admin,
+    `#graphql
+      mutation MetafieldsSet($metafields: [MetafieldsSetInput!]!) {
+        metafieldsSet(metafields: $metafields) {
+          metafields {
+            id
+            namespace
+            key
+            value
+          }
+          userErrors {
+            field
+            message
+          }
+        }
+      }
+    `,
+    { metafields },
+  );
+
+  const errors = data?.data?.metafieldsSet?.userErrors || [];
+  if (errors.length) {
+    throw new Error(errors.map((e: any) => e.message).join(" | "));
+  }
+
+  return data?.data?.metafieldsSet?.metafields || [];
 }
 
 export async function loader({ request }: LoaderFunctionArgs) {
@@ -245,7 +318,11 @@ export async function action({ request }: ActionFunctionArgs) {
         preparedCustomer = await createOrPrepareTaxExemptCustomer({
           shop,
           email: customerEmail,
-          companyName: viesCompanyName || companyName,
+          companyName,
+          vatNumber,
+          countryCode,
+          viesCompanyName,
+          viesAddress,
         });
 
         taxExemptCustomerPrepared = Boolean(preparedCustomer?.taxExempt);
@@ -287,6 +364,14 @@ export async function action({ request }: ActionFunctionArgs) {
         status,
       },
     });
+
+    if (preparedCustomer?.id) {
+      const { admin } = await unauthenticated.admin(shop);
+
+      await setCustomerMetafields(admin, preparedCustomer.id, {
+        "b2b.invoice_request_id": invoiceRequest.id,
+      });
+    }
 
     return json({
       ok: true,
