@@ -1,6 +1,6 @@
 client_id = "55fc4b9bda2c09e3278bd014bf6447af"
 name = "b2b-vies-approval"
-application_url = "https://vies-approval-form.onrender.com"
+application_url = "https://b2b-vies-approval-d6ib.onrender.com"
 embedded = true
 
 [build]
@@ -17,15 +17,17 @@ api_version = "2026-07"
   topics = [ "app/scopes_update" ]
   uri = "/webhooks/app/scopes_update"
 
+  [[webhooks.subscriptions]]
+  topics = [ "orders/create" ]
+  uri = "/webhooks/orders/create"
+
 [access_scopes]
 scopes = "read_customers,write_customers,read_companies,write_companies,write_orders"
+
 [auth]
-redirect_urls = [ "https://b2b-vies-approval-d6ib.onrender.com/api/auth" ]
+redirect_urls = [ "https://b2b-vies-approval-d6ib.onrender.com/auth/callback" ]
+
 [app_proxy]
-url = "https://b2b-vies-approval-d6ib.onrender.com/appsoner/invoice-request"
+url = "https://b2b-vies-approval-d6ib.onrender.com/apps/invoice-request"
 prefix = "apps"
 subpath = "invoice-request"
-
-[[webhooks.subscriptions]]
-topics = [ "orders/create" ]
-uri = "/webhooks/orders/create"
