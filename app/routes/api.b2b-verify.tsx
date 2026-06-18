@@ -7,13 +7,14 @@ const VIES_WSDL =
   "https://ec.europa.eu/taxation_customs/vies/checkVatService.wsdl";
 
 const AUTO_APPROVE_MATCH_THRESHOLD = 70;
-const DEFAULT_SHOP = "buzz-hive-store.myshopify.com";
+const DEFAULT_SHOP = "zig-italia-frutta-secca-e-semi.myshopify.com";
 
 const MANAGED_B2B_TAGS = [
   "b2b_pending_review",
   "b2b_rejected",
   "b2b_customer",
   "b2b_auto_approved",
+  "b2b_manually_approved",
   "vat_verified",
 ];
 
@@ -334,9 +335,9 @@ async function syncB2BTags(
   }
 }
 
-async function setCustomerMetafields(
+async function setOwnerMetafields(
   admin: any,
-  customerId: string,
+  ownerId: string,
   metafieldsToWrite: Record<string, string>,
 ) {
   const metafields = Object.entries(metafieldsToWrite)
@@ -345,11 +346,11 @@ async function setCustomerMetafields(
       const [namespace, key] = fullKey.split(".");
 
       return {
-        ownerId: customerId,
+        ownerId,
         namespace,
         key,
         type:
-          key === "vies_address"
+          key === "vies_address" || key === "fiscal_note"
             ? "multi_line_text_field"
             : "single_line_text_field",
         value: String(value ?? "").trim(),
@@ -387,6 +388,22 @@ async function setCustomerMetafields(
   }
 
   return data?.data?.metafieldsSet?.metafields ?? [];
+}
+
+async function setCustomerMetafields(
+  admin: any,
+  customerId: string,
+  metafieldsToWrite: Record<string, string>,
+) {
+  return setOwnerMetafields(admin, customerId, metafieldsToWrite);
+}
+
+async function setCompanyMetafields(
+  admin: any,
+  companyId: string,
+  metafieldsToWrite: Record<string, string>,
+) {
+  return setOwnerMetafields(admin, companyId, metafieldsToWrite);
 }
 
 async function createCompanyForApprovedCustomer({
@@ -642,6 +659,18 @@ async function upsertCustomerAndWriteData({
       vies,
       billingValidation,
     });
+
+    const companyMetafieldsToWrite = {
+      ...metafieldsToWrite,
+      "b2b.company_id": company?.companyId || "",
+      "b2b.company_location_id": company?.companyLocationId || "",
+    };
+
+    await setCustomerMetafields(admin, customer.id, companyMetafieldsToWrite);
+
+    if (company?.companyId) {
+      await setCompanyMetafields(admin, company.companyId, companyMetafieldsToWrite);
+    }
   }
 
   return {
@@ -752,6 +781,7 @@ export async function action({ request }: ActionFunctionArgs) {
       "b2b.verified_at": new Date().toISOString(),
       "b2b.company_name_submitted": submittedCompanyName,
       "b2b.billing_country": billingValidation.billingCountry,
+      "b2b.reverse_charge": "false",
     };
 
     b2bApplication = await db.b2BApplication.create({
