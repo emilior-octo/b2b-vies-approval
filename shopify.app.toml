@@ -20,9 +20,9 @@ api_version = "2026-07"
 [access_scopes]
 scopes = "read_customers,write_customers,read_companies,write_companies,write_orders"
 [auth]
-redirect_urls = [ "https://vies-approval-form.onrender.com/api/auth" ]
+redirect_urls = [ "https://b2b-vies-approval-d6ib.onrender.com/api/auth" ]
 [app_proxy]
-url = "https://vies-approval-form.onrender.com/apps/invoice-request"
+url = "https://b2b-vies-approval-d6ib.onrender.com/appsoner/invoice-request"
 prefix = "apps"
 subpath = "invoice-request"
 
