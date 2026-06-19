@@ -71,16 +71,13 @@ async function createDefinition(admin: any, definition: Definition) {
       }
     `,
     {
-      definition: {
-        name: definition.name,
-        namespace: definition.namespace,
-        key: definition.key,
-        type: definition.type,
-        ownerType: definition.ownerType,
-        access: {
-          admin: "MERCHANT_READ_WRITE",
-          storefront: "NONE",
-        },
+definition: {
+  name: definition.name,
+  namespace: definition.namespace,
+  key: definition.key,
+  type: definition.type,
+  ownerType: definition.ownerType,
+},
       },
     },
   );
