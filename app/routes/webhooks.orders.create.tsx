@@ -12,6 +12,9 @@ const INVOICE_REQUEST_ID_KEYS = ["invoice_request_id"];
 const CUSTOMER_EMAIL_KEYS = ["customer_email", "email"];
 
 const FISCAL_CODE_KEYS = [
+  "TAX_CREDENTIAL_IT",
+  "IT.TAX_CREDENTIAL_IT",
+  "tax credential",
   "fiscal_code",
   "fiscalCode",
   "codice_fiscale",
@@ -19,18 +22,23 @@ const FISCAL_CODE_KEYS = [
   "codiceFiscale",
   "Codice fiscale",
   "Codice Fiscale",
-  "TAX_CREDENTIAL_IT",
-  "tax_credential_it",
-  "taxCredentialIt",
+  "tax_code",
+  "taxCode",
+  "cf",
 ];
 
 const PEC_KEYS = [
+  "TAX_EMAIL_IT",
+  "IT.TAX_EMAIL_IT",
+  "tax email",
   "pec",
   "PEC",
   "certified_email",
   "certifiedEmail",
   "certified email",
+  "posta certificata",
   "posta_certificata",
+  "posta_elettronica_certificata",
 ];
 
 const SDI_KEYS = [
@@ -73,7 +81,7 @@ function normalize(value: any) {
 }
 
 function normalizeKey(value: any) {
-  return normalize(value).toLowerCase().replace(/[\s\-]+/g, "_");
+  return normalize(value).toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
 function yes(value: any) {
@@ -133,13 +141,20 @@ function getAttrFromPairs(pairs: any[], keys: string[]) {
 }
 
 function getLocalizationValue(orderApi: any, keys: string[]) {
-  const wanted = keys.map(normalizeKey);
+  const wanted = keys.map(normalizeKey).filter(Boolean);
   const nodes = orderApi?.localizationExtensions?.nodes || [];
 
   for (const node of nodes) {
-    const candidates = [node?.key, node?.title, node?.purpose]
-      .map(normalizeKey)
-      .filter(Boolean);
+    // IMPORTANT: do not use purpose here. Shopify often uses a generic purpose
+    // such as TAX for both Codice Fiscale and PEC, and that can make PEC pick
+    // the fiscal code by mistake. Match only strict key/title/country.key.
+    const rawCandidates = [
+      node?.key,
+      node?.title,
+      node?.countryCode && node?.key ? `${node.countryCode}.${node.key}` : "",
+    ];
+
+    const candidates = rawCandidates.map(normalizeKey).filter(Boolean);
 
     if (candidates.some((candidate) => wanted.includes(candidate))) {
       const value = normalize(node?.value);
