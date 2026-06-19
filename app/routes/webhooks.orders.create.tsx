@@ -24,9 +24,14 @@ const SDI_KEYS = [
 
 const VAT_KEYS = ["vat_number", "VAT", "vatNumber", "partita_iva", "Partita IVA"];
 const COMPANY_KEYS = ["company_name", "companyName", "ragione_sociale", "Ragione sociale"];
+const COUNTRY_KEYS = ["invoice_country_code", "billing_country", "countryCode", "country"];
 
 function normalize(value: any) {
   return String(value || "").trim();
+}
+
+function normalizeKey(value: string) {
+  return normalize(value).toLowerCase().replace(/[\s\-_]+/g, "");
 }
 
 function getAllAttributes(order: any) {
@@ -40,13 +45,31 @@ function getAllAttributes(order: any) {
 
 function getAttr(order: any, key: string) {
   const attrs = getAllAttributes(order);
-  const found = attrs.find((item: any) => item.name === key || item.key === key);
+  const target = normalizeKey(key);
+  const found = attrs.find((item: any) => {
+    const itemKey = normalizeKey(item.name || item.key);
+    return itemKey === target;
+  });
+
   return normalize(found?.value);
 }
 
 function getAttrAny(order: any, keys: string[]) {
   for (const key of keys) {
     const value = getAttr(order, key);
+    if (value) return value;
+  }
+
+  return "";
+}
+
+function getGraphQlAttrAny(graphOrder: any, keys: string[]) {
+  const attrs = graphOrder?.customAttributes || [];
+
+  for (const key of keys) {
+    const target = normalizeKey(key);
+    const found = attrs.find((item: any) => normalizeKey(item.key) === target);
+    const value = normalize(found?.value);
     if (value) return value;
   }
 
@@ -141,6 +164,63 @@ async function setOrderMetafields(
   return data?.data?.metafieldsSet?.metafields || [];
 }
 
+async function getOrderContext(admin: any, orderGid: string) {
+  const data = await graphQL(
+    admin,
+    `#graphql
+      query OrderFiscalContext($id: ID!) {
+        order(id: $id) {
+          id
+          name
+          email
+          note
+          customAttributes { key value }
+          customer {
+            id
+            email
+            customMetafields: metafields(first: 50, namespace: "custom") {
+              nodes { key value }
+            }
+            b2bMetafields: metafields(first: 50, namespace: "b2b") {
+              nodes { key value }
+            }
+          }
+        }
+      }
+    `,
+    { id: orderGid },
+  );
+
+  return data?.data?.order || null;
+}
+
+function metafieldMap(nodes: any[] = []) {
+  const map: Record<string, string> = {};
+
+  for (const item of nodes || []) {
+    const key = normalize(item.key);
+    const value = normalize(item.value);
+    if (key && value) map[key] = value;
+  }
+
+  return map;
+}
+
+function getMetaAny(meta: Record<string, string>, keys: string[]) {
+  const normalized: Record<string, string> = {};
+
+  for (const [key, value] of Object.entries(meta || {})) {
+    normalized[normalizeKey(key)] = value;
+  }
+
+  for (const key of keys) {
+    const value = normalized[normalizeKey(key)];
+    if (value) return value;
+  }
+
+  return "";
+}
+
 async function getCustomerB2BData(admin: any, customerGid: string) {
   if (!customerGid) return null;
 
@@ -152,12 +232,8 @@ async function getCustomerB2BData(admin: any, customerGid: string) {
           id
           email
           tags
-          metafields(first: 30, namespace: "b2b") {
-            nodes {
-              namespace
-              key
-              value
-            }
+          metafields(first: 50, namespace: "b2b") {
+            nodes { namespace key value }
           }
         }
       }
@@ -168,11 +244,7 @@ async function getCustomerB2BData(admin: any, customerGid: string) {
   const customer = data?.data?.customer;
   if (!customer) return null;
 
-  const meta: Record<string, string> = {};
-
-  for (const item of customer.metafields?.nodes || []) {
-    meta[item.key] = item.value;
-  }
+  const meta = metafieldMap(customer.metafields?.nodes || []);
 
   const hasFiscalData =
     meta.vat_number ||
@@ -183,53 +255,27 @@ async function getCustomerB2BData(admin: any, customerGid: string) {
 
   if (!hasFiscalData) return null;
 
-  return {
-    customer,
-    meta,
-  };
+  return { customer, meta };
 }
 
-async function getCustomerCustomFiscalData(admin: any, customerGid: string) {
-  if (!customerGid) return null;
-
-  const data = await graphQL(
-    admin,
-    `#graphql
-      query CustomerCustomFiscalData($id: ID!) {
-        customer(id: $id) {
-          id
-          email
-          fiscalCode: metafield(namespace: "custom", key: "fiscal_code") { value }
-          pec: metafield(namespace: "custom", key: "pec") { value }
-          sdi: metafield(namespace: "custom", key: "sdi") { value }
-          vatNumber: metafield(namespace: "custom", key: "vat_number") { value }
-          invoiceCountryCode: metafield(namespace: "custom", key: "invoice_country_code") { value }
-          companyName: metafield(namespace: "custom", key: "company_name") { value }
-          invoiceType: metafield(namespace: "custom", key: "invoice_type") { value }
-          viesChecked: metafield(namespace: "custom", key: "vies_checked") { value }
-          viesValid: metafield(namespace: "custom", key: "vies_valid") { value }
-          reverseCharge: metafield(namespace: "custom", key: "reverse_charge") { value }
-        }
-      }
-    `,
-    { id: customerGid },
-  );
-
-  const customer = data?.data?.customer;
+function getCustomerCustomFiscalDataFromOrderContext(graphOrder: any) {
+  const customer = graphOrder?.customer;
   if (!customer) return null;
+
+  const meta = metafieldMap(customer.customMetafields?.nodes || []);
 
   return {
     customer,
-    fiscalCode: normalize(customer.fiscalCode?.value),
-    pec: normalize(customer.pec?.value),
-    sdi: normalize(customer.sdi?.value),
-    vatNumber: normalize(customer.vatNumber?.value),
-    invoiceCountryCode: normalize(customer.invoiceCountryCode?.value),
-    companyName: normalize(customer.companyName?.value),
-    invoiceType: normalize(customer.invoiceType?.value),
-    viesChecked: normalize(customer.viesChecked?.value),
-    viesValid: normalize(customer.viesValid?.value),
-    reverseCharge: normalize(customer.reverseCharge?.value),
+    fiscalCode: getMetaAny(meta, FISCAL_CODE_KEYS),
+    pec: getMetaAny(meta, PEC_KEYS),
+    sdi: getMetaAny(meta, SDI_KEYS),
+    vatNumber: getMetaAny(meta, VAT_KEYS),
+    invoiceCountryCode: getMetaAny(meta, COUNTRY_KEYS),
+    companyName: getMetaAny(meta, COMPANY_KEYS),
+    invoiceType: getMetaAny(meta, ["invoice_type", "invoiceType"]),
+    viesChecked: getMetaAny(meta, ["vies_checked", "viesChecked"]),
+    viesValid: getMetaAny(meta, ["vies_valid", "viesValid"]),
+    reverseCharge: getMetaAny(meta, ["reverse_charge", "reverseCharge"]),
   };
 }
 
@@ -237,9 +283,7 @@ async function getInvoiceRequestFromDb(invoiceRequestId: string) {
   if (!invoiceRequestId) return null;
 
   try {
-    return await db.invoiceRequest.findUnique({
-      where: { id: invoiceRequestId },
-    });
+    return await db.invoiceRequest.findUnique({ where: { id: invoiceRequestId } });
   } catch (_error) {
     return null;
   }
@@ -247,10 +291,12 @@ async function getInvoiceRequestFromDb(invoiceRequestId: string) {
 
 function buildInvoiceNote({
   order,
+  graphOrder,
   dbRequest,
   customerFiscalData,
 }: {
   order: any;
+  graphOrder?: any;
   dbRequest?: any;
   customerFiscalData?: any;
 }) {
@@ -259,6 +305,7 @@ function buildInvoiceNote({
 
   const invoiceType =
     getAttr(order, "invoice_type") ||
+    getGraphQlAttrAny(graphOrder, ["invoice_type", "invoiceType"]) ||
     customerFiscalData?.invoiceType ||
     dbRequest?.invoiceType ||
     "private";
@@ -267,58 +314,70 @@ function buildInvoiceNote({
 
   const fiscalCode =
     getAttrAny(order, FISCAL_CODE_KEYS) ||
+    getGraphQlAttrAny(graphOrder, FISCAL_CODE_KEYS) ||
     customerFiscalData?.fiscalCode ||
+    dbRequest?.fiscalCode ||
     "";
 
   const pec =
     getAttrAny(order, PEC_KEYS) ||
+    getGraphQlAttrAny(graphOrder, PEC_KEYS) ||
     customerFiscalData?.pec ||
     dbRequest?.pec ||
     "";
 
   const sdi =
     getAttrAny(order, SDI_KEYS) ||
+    getGraphQlAttrAny(graphOrder, SDI_KEYS) ||
     customerFiscalData?.sdi ||
     dbRequest?.codiceDestinatario ||
     "";
 
   const companyName =
     getAttrAny(order, COMPANY_KEYS) ||
+    getGraphQlAttrAny(graphOrder, COMPANY_KEYS) ||
     customerFiscalData?.companyName ||
     dbRequest?.companyName ||
     "";
 
   const vatNumber =
     getAttrAny(order, VAT_KEYS) ||
+    getGraphQlAttrAny(graphOrder, VAT_KEYS) ||
     customerFiscalData?.vatNumber ||
     dbRequest?.vatNumber ||
     "";
 
   const country =
-    getAttr(order, "invoice_country_code") ||
+    getAttrAny(order, COUNTRY_KEYS) ||
+    getGraphQlAttrAny(graphOrder, COUNTRY_KEYS) ||
     customerFiscalData?.invoiceCountryCode ||
     dbRequest?.billingCountry ||
     "";
 
   const customerEmail =
     getAttr(order, "customer_email") ||
+    graphOrder?.customer?.email ||
     customerFiscalData?.customer?.email ||
     dbRequest?.email ||
     order.email ||
+    graphOrder?.email ||
     "";
 
   const viesChecked =
     getAttr(order, "vies_checked") ||
+    getGraphQlAttrAny(graphOrder, ["vies_checked", "viesChecked"]) ||
     customerFiscalData?.viesChecked ||
     (dbRequest?.viesChecked === true ? "true" : dbRequest?.viesChecked === false ? "false" : "");
 
   const viesValid =
     getAttr(order, "vies_valid") ||
+    getGraphQlAttrAny(graphOrder, ["vies_valid", "viesValid"]) ||
     customerFiscalData?.viesValid ||
     (dbRequest?.viesValid === true ? "true" : dbRequest?.viesValid === false ? "false" : "");
 
   const reverseCharge =
     getAttr(order, "reverse_charge") ||
+    getGraphQlAttrAny(graphOrder, ["reverse_charge", "reverseCharge"]) ||
     customerFiscalData?.reverseCharge ||
     (dbRequest?.reverseCharge === true ? "true" : dbRequest?.reverseCharge === false ? "false" : "");
 
@@ -387,12 +446,26 @@ function buildB2BFiscalNote(order: any, b2bData: any) {
   ].join("\n");
 }
 
-function appendNote(existingNote: string, block: string, marker: string) {
+function upsertNoteBlock(existingNote: string, block: string, marker: string) {
   const current = normalize(existingNote);
+  if (!block) return current;
 
-  if (current.includes(marker)) return current;
+  const start = current.indexOf(marker);
+  if (start === -1) return [current, block].filter(Boolean).join("\n\n");
 
-  return [current, block].filter(Boolean).join("\n\n");
+  const afterStart = current.slice(start);
+  const endMarker = "=======================";
+  const relativeEnd = afterStart.indexOf(endMarker);
+  if (relativeEnd === -1) return current;
+
+  const end = start + relativeEnd + endMarker.length;
+  return `${current.slice(0, start).trim()}\n\n${block}\n\n${current.slice(end).trim()}`.trim();
+}
+
+function boolString(value: any) {
+  if (value === true) return "true";
+  if (value === false) return "false";
+  return normalize(value);
 }
 
 export const action = async ({ request }: any) => {
@@ -402,68 +475,111 @@ export const action = async ({ request }: any) => {
     console.log(`WEBHOOK ${topic} from ${shop}`);
 
     const order = payload;
-    const orderGid =
-      order.admin_graphql_api_id || `gid://shopify/Order/${order.id}`;
+    const orderGid = order.admin_graphql_api_id || `gid://shopify/Order/${order.id}`;
 
     const { admin } = await unauthenticated.admin(shop);
 
     const invoiceRequested = yes(getAttr(order, "invoice_requested"));
     const invoiceRequestId = getAttr(order, "invoice_request_id");
 
+    let graphOrder: any = null;
+    try {
+      graphOrder = await getOrderContext(admin, orderGid);
+    } catch (error) {
+      console.error("Order context query failed:", error);
+    }
+
     const customerGid =
+      graphOrder?.customer?.id ||
       order.customer?.admin_graphql_api_id ||
       (order.customer?.id ? `gid://shopify/Customer/${order.customer.id}` : "");
 
-    let nextNote = normalize(order.note);
+    let nextNote = normalize(graphOrder?.note || order.note);
     const tags: string[] = [];
 
     if (invoiceRequested) {
-      const [customerFiscalData, dbRequest] = await Promise.all([
-        customerGid ? getCustomerCustomFiscalData(admin, customerGid) : Promise.resolve(null),
-        getInvoiceRequestFromDb(invoiceRequestId),
-      ]);
+      const [dbRequest] = await Promise.all([getInvoiceRequestFromDb(invoiceRequestId)]);
+      const customerFiscalData = getCustomerCustomFiscalDataFromOrderContext(graphOrder);
 
       const fiscalNote = buildInvoiceNote({
         order,
+        graphOrder,
         dbRequest,
         customerFiscalData,
       });
+
+      const fiscalCode =
+        getAttrAny(order, FISCAL_CODE_KEYS) ||
+        getGraphQlAttrAny(graphOrder, FISCAL_CODE_KEYS) ||
+        customerFiscalData?.fiscalCode ||
+        dbRequest?.fiscalCode ||
+        "";
+      const pec =
+        getAttrAny(order, PEC_KEYS) ||
+        getGraphQlAttrAny(graphOrder, PEC_KEYS) ||
+        customerFiscalData?.pec ||
+        dbRequest?.pec ||
+        "";
+      const sdi =
+        getAttrAny(order, SDI_KEYS) ||
+        getGraphQlAttrAny(graphOrder, SDI_KEYS) ||
+        customerFiscalData?.sdi ||
+        dbRequest?.codiceDestinatario ||
+        "";
+      const vatNumber =
+        getAttrAny(order, VAT_KEYS) ||
+        getGraphQlAttrAny(graphOrder, VAT_KEYS) ||
+        customerFiscalData?.vatNumber ||
+        dbRequest?.vatNumber ||
+        "";
+      const companyName =
+        getAttrAny(order, COMPANY_KEYS) ||
+        getGraphQlAttrAny(graphOrder, COMPANY_KEYS) ||
+        customerFiscalData?.companyName ||
+        dbRequest?.companyName ||
+        "";
+      const country =
+        getAttrAny(order, COUNTRY_KEYS) ||
+        getGraphQlAttrAny(graphOrder, COUNTRY_KEYS) ||
+        customerFiscalData?.invoiceCountryCode ||
+        dbRequest?.billingCountry ||
+        "";
+      const invoiceType =
+        getAttr(order, "invoice_type") ||
+        getGraphQlAttrAny(graphOrder, ["invoice_type", "invoiceType"]) ||
+        customerFiscalData?.invoiceType ||
+        dbRequest?.invoiceType ||
+        "";
 
       if (invoiceRequestId) {
         await db.invoiceRequest.updateMany({
           where: { id: invoiceRequestId },
           data: {
             orderId: orderGid,
-            orderName: order.name || null,
+            orderName: order.name || graphOrder?.name || null,
+            customerId: customerGid || dbRequest?.customerId || null,
             email:
               order.email ||
               getAttr(order, "customer_email") ||
+              graphOrder?.customer?.email ||
               customerFiscalData?.customer?.email ||
               dbRequest?.email ||
               null,
+            invoiceType: invoiceType || dbRequest?.invoiceType || "private",
+            companyName: companyName || dbRequest?.companyName || null,
+            fiscalCode: fiscalCode || dbRequest?.fiscalCode || null,
+            vatNumber: vatNumber || dbRequest?.vatNumber || null,
+            billingCountry: country || dbRequest?.billingCountry || null,
+            pec: pec || dbRequest?.pec || null,
+            codiceDestinatario: sdi || dbRequest?.codiceDestinatario || null,
             status: "completed",
           },
         });
       }
 
       if (fiscalNote) {
-        nextNote = appendNote(nextNote, fiscalNote, "=== INVOICE REQUEST ===");
+        nextNote = upsertNoteBlock(nextNote, fiscalNote, "=== INVOICE REQUEST ===");
       }
-
-      const fiscalCode =
-        getAttrAny(order, FISCAL_CODE_KEYS) || customerFiscalData?.fiscalCode || "";
-      const pec =
-        getAttrAny(order, PEC_KEYS) || customerFiscalData?.pec || dbRequest?.pec || "";
-      const sdi =
-        getAttrAny(order, SDI_KEYS) || customerFiscalData?.sdi || dbRequest?.codiceDestinatario || "";
-      const vatNumber =
-        getAttrAny(order, VAT_KEYS) || customerFiscalData?.vatNumber || dbRequest?.vatNumber || "";
-      const companyName =
-        getAttrAny(order, COMPANY_KEYS) || customerFiscalData?.companyName || dbRequest?.companyName || "";
-      const country =
-        getAttr(order, "invoice_country_code") || customerFiscalData?.invoiceCountryCode || dbRequest?.billingCountry || "";
-      const invoiceType =
-        getAttr(order, "invoice_type") || customerFiscalData?.invoiceType || dbRequest?.invoiceType || "";
 
       tags.push("invoice_request");
 
@@ -482,9 +598,18 @@ export const action = async ({ request }: any) => {
         "invoice.billing_country": country,
         "invoice.pec": pec,
         "invoice.codice_destinatario": sdi,
-        "invoice.vies_valid": getAttr(order, "vies_valid") || customerFiscalData?.viesValid || (dbRequest?.viesValid === true ? "true" : dbRequest?.viesValid === false ? "false" : ""),
-        "invoice.reverse_charge": getAttr(order, "reverse_charge") || customerFiscalData?.reverseCharge || (dbRequest?.reverseCharge === true ? "true" : dbRequest?.reverseCharge === false ? "false" : ""),
-        "invoice.tax_exempt_applied": getAttr(order, "tax_exempt_applied") || (dbRequest?.taxExemptApplied === true ? "true" : dbRequest?.taxExemptApplied === false ? "false" : ""),
+        "invoice.vies_valid":
+          getAttr(order, "vies_valid") ||
+          getGraphQlAttrAny(graphOrder, ["vies_valid", "viesValid"]) ||
+          customerFiscalData?.viesValid ||
+          boolString(dbRequest?.viesValid),
+        "invoice.reverse_charge":
+          getAttr(order, "reverse_charge") ||
+          getGraphQlAttrAny(graphOrder, ["reverse_charge", "reverseCharge"]) ||
+          customerFiscalData?.reverseCharge ||
+          boolString(dbRequest?.reverseCharge),
+        "invoice.tax_exempt_applied":
+          getAttr(order, "tax_exempt_applied") || boolString(dbRequest?.taxExemptApplied),
         "invoice.fiscal_note": fiscalNote || "",
       });
     }
@@ -496,7 +621,7 @@ export const action = async ({ request }: any) => {
         const b2bNote = buildB2BFiscalNote(order, b2bData);
         const meta = b2bData.meta || {};
 
-        nextNote = appendNote(nextNote, b2bNote, "=== B2B FISCAL DATA ===");
+        nextNote = upsertNoteBlock(nextNote, b2bNote, "=== B2B FISCAL DATA ===");
 
         tags.push("b2b_customer_order", "b2b_fiscal_data");
 
@@ -514,7 +639,7 @@ export const action = async ({ request }: any) => {
       }
     }
 
-    if (nextNote && nextNote !== normalize(order.note)) {
+    if (nextNote && nextNote !== normalize(graphOrder?.note || order.note)) {
       await updateOrderNote(admin, orderGid, nextNote);
     }
 

@@ -62,6 +62,7 @@ export async function action({ request }: any) {
     firstName: emptyToNull(formData.get("firstName")),
     lastName: emptyToNull(formData.get("lastName")),
     companyName: emptyToNull(formData.get("companyName")),
+    fiscalCode: emptyToNull(formData.get("fiscalCode")),
     vatNumber: emptyToNull(formData.get("vatNumber")),
     billingCountry: emptyToNull(formData.get("billingCountry")),
     pec: emptyToNull(formData.get("pec")),
@@ -145,7 +146,8 @@ function getWarnings(item: any) {
   }
 
   if (type === "private") {
-    warnings.push("Per privato: verificare Codice Fiscale e PEC nella nota ordine/customer dopo il checkout");
+    if (isMissing(item.fiscalCode)) warnings.push("Codice Fiscale mancante");
+    if (isMissing(item.pec)) warnings.push("PEC mancante");
   }
 
   if (isCompany && isMissing(item.companyName)) {
@@ -205,6 +207,7 @@ export default function InvoiceRequestsPage() {
       const haystack = [
         item.email,
         item.companyName,
+        item.fiscalCode,
         item.vatNumber,
         item.billingCountry,
         item.orderName,
@@ -293,7 +296,7 @@ export default function InvoiceRequestsPage() {
 
                 <div>
                   <strong>{item.companyName || item.email || "Richiesta fattura"}</strong>
-                  <div style={muted}>{item.vatNumber || "Nessuna VAT"}</div>
+                  <div style={muted}>{item.invoiceType === "private" ? `CF: ${item.fiscalCode || "mancante"}` : item.vatNumber || "Nessuna VAT"}</div>
                 </div>
 
                 <div>
@@ -364,6 +367,10 @@ export default function InvoiceRequestsPage() {
 
                         <Field label="Ragione sociale">
                           <input name="companyName" defaultValue={item.companyName || ""} style={input} />
+                        </Field>
+
+                        <Field label="Codice Fiscale">
+                          <input name="fiscalCode" defaultValue={item.fiscalCode || ""} style={input} />
                         </Field>
 
                         <Field label="Partita IVA / VAT">

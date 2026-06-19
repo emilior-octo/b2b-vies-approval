@@ -93,6 +93,7 @@ model InvoiceRequest {
   lastName String?
 
   companyName String?
+  fiscalCode String?
   vatNumber String?
   billingCountry String?
 
