@@ -7,26 +7,31 @@ import db from "../db.server";
 export async function loader({ request }: any) {
   await authenticate.admin(request);
 
+  const baseWhere = {
+    orderId: { not: null },
+  };
+
   const invoiceRequests = await db.invoiceRequest.findMany({
+    where: baseWhere,
     orderBy: { createdAt: "desc" },
-    take: 150,
+    take: 200,
   });
 
-  const [total, registered, pending, completed, rejected, reverseCharge] =
+  const [total, registrate, pending, completed, rejected, reverseCharge] =
     await Promise.all([
-      db.invoiceRequest.count(),
-      db.invoiceRequest.count({ where: { status: "registered" } }),
-      db.invoiceRequest.count({ where: { status: "pending_review" } }),
-      db.invoiceRequest.count({ where: { status: "completed" } }),
-      db.invoiceRequest.count({ where: { status: "rejected" } }),
-      db.invoiceRequest.count({ where: { reverseCharge: true } }),
+      db.invoiceRequest.count({ where: baseWhere }),
+      db.invoiceRequest.count({ where: { ...baseWhere, status: "registered" } }),
+      db.invoiceRequest.count({ where: { ...baseWhere, status: "pending_review" } }),
+      db.invoiceRequest.count({ where: { ...baseWhere, status: "completed" } }),
+      db.invoiceRequest.count({ where: { ...baseWhere, status: "rejected" } }),
+      db.invoiceRequest.count({ where: { ...baseWhere, reverseCharge: true } }),
     ]);
 
   return {
     invoiceRequests,
     stats: {
       total,
-      registered,
+      registrate,
       pending,
       completed,
       rejected,
@@ -39,12 +44,16 @@ export async function action({ request }: any) {
   await authenticate.admin(request);
 
   const formData = await request.formData();
-
   const id = String(formData.get("id") || "");
   const intent = String(formData.get("intent") || "");
 
   if (!id) {
-    throw new Response("Missing invoice request id", { status: 400 });
+    throw new Response("ID richiesta mancante", { status: 400 });
+  }
+
+  if (intent === "delete") {
+    await db.invoiceRequest.delete({ where: { id } });
+    return null;
   }
 
   const baseData = {
@@ -68,55 +77,17 @@ export async function action({ request }: any) {
       where: { id },
       data: baseData,
     });
-
     return null;
   }
 
-  if (intent === "registered") {
+  if (["registered", "pending_review", "completed", "rejected"].includes(intent)) {
     await db.invoiceRequest.update({
       where: { id },
       data: {
         ...baseData,
-        status: "registered",
+        status: intent,
       },
     });
-
-    return null;
-  }
-
-  if (intent === "pending") {
-    await db.invoiceRequest.update({
-      where: { id },
-      data: {
-        ...baseData,
-        status: "pending_review",
-      },
-    });
-
-    return null;
-  }
-
-  if (intent === "completed") {
-    await db.invoiceRequest.update({
-      where: { id },
-      data: {
-        ...baseData,
-        status: "completed",
-      },
-    });
-
-    return null;
-  }
-
-  if (intent === "reject") {
-    await db.invoiceRequest.update({
-      where: { id },
-      data: {
-        ...baseData,
-        status: "rejected",
-      },
-    });
-
     return null;
   }
 
@@ -129,10 +100,10 @@ function emptyToNull(value: FormDataEntryValue | null) {
 }
 
 function statusLabel(status: string) {
-  if (status === "completed") return "✅ Completed";
-  if (status === "rejected") return "❌ Rejected";
-  if (status === "pending_review") return "🟡 Manual review";
-  return "🟢 Registered";
+  if (status === "completed") return "Completata";
+  if (status === "rejected") return "Rifiutata";
+  if (status === "pending_review") return "Da controllare";
+  return "Registrata";
 }
 
 function statusColor(status: string) {
@@ -142,9 +113,68 @@ function statusColor(status: string) {
   return "#e5f0ff";
 }
 
-function invoiceTypeLabel(type: string) {
-  if (type === "company") return "Company";
-  return "Private";
+function invoiceTypeLabel(type: string, country?: string | null) {
+  const normalizedCountry = String(country || "").toUpperCase();
+  if (type === "company" && normalizedCountry && normalizedCountry !== "IT") {
+    return "Azienda estera";
+  }
+  if (type === "company") return "Azienda Italia";
+  return "Privato";
+}
+
+function formatDate(value: Date | string | null | undefined) {
+  if (!value) return "-";
+  return new Date(value).toLocaleString("it-IT");
+}
+
+function isMissing(value: unknown) {
+  return String(value || "").trim() === "";
+}
+
+function getWarnings(item: any) {
+  const warnings: string[] = [];
+  const type = String(item.invoiceType || "private");
+  const country = String(item.billingCountry || "").toUpperCase();
+  const isCompany = type === "company";
+  const isForeignCompany = isCompany && country && country !== "IT";
+  const isItalianCompany = isCompany && (!country || country === "IT");
+
+
+  if (!item.email) {
+    warnings.push("Email mancante");
+  }
+
+  if (type === "private") {
+    warnings.push("Per privato: verificare Codice Fiscale e PEC nella nota ordine/customer dopo il checkout");
+  }
+
+  if (isCompany && isMissing(item.companyName)) {
+    warnings.push("Ragione sociale mancante");
+  }
+
+  if (isCompany && isMissing(item.vatNumber)) {
+    warnings.push("Partita IVA/VAT mancante");
+  }
+
+  if (isCompany && isMissing(item.billingCountry)) {
+    warnings.push("Paese mancante");
+  }
+
+  if (isItalianCompany && isMissing(item.pec) && isMissing(item.codiceDestinatario)) {
+    warnings.push("Per azienda italiana manca PEC o Codice Destinatario");
+  }
+
+  if (isForeignCompany) {
+    if (!item.viesChecked) warnings.push("VIES non controllato");
+    if (item.viesChecked && item.viesValid !== true) warnings.push("VAT estero non validato");
+    if (!item.reverseCharge) warnings.push("Reverse charge non applicato");
+  }
+
+  return warnings;
+}
+
+function hasWarnings(item: any) {
+  return getWarnings(item).length > 0;
 }
 
 export default function InvoiceRequestsPage() {
@@ -152,13 +182,25 @@ export default function InvoiceRequestsPage() {
   const [openId, setOpenId] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
+  const [typeFilter, setTypeFilter] = useState("all");
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
 
     return invoiceRequests.filter((item) => {
-      const matchesStatus =
-        statusFilter === "all" || item.status === statusFilter;
+      const matchesStatus = statusFilter === "all" || item.status === statusFilter;
+
+      const itemType = String(item.invoiceType || "private");
+      const country = String(item.billingCountry || "").toUpperCase();
+      const isForeign = itemType === "company" && country && country !== "IT";
+      const isItalianCompany = itemType === "company" && (!country || country === "IT");
+
+      const matchesType =
+        typeFilter === "all" ||
+        (typeFilter === "private" && itemType === "private") ||
+        (typeFilter === "company_it" && isItalianCompany) ||
+        (typeFilter === "company_foreign" && isForeign) ||
+        (typeFilter === "incomplete" && hasWarnings(item));
 
       const haystack = [
         item.email,
@@ -167,6 +209,8 @@ export default function InvoiceRequestsPage() {
         item.billingCountry,
         item.orderName,
         item.viesCompanyName,
+        item.pec,
+        item.codiceDestinatario,
       ]
         .filter(Boolean)
         .join(" ")
@@ -174,31 +218,29 @@ export default function InvoiceRequestsPage() {
 
       const matchesQuery = !q || haystack.includes(q);
 
-      return matchesStatus && matchesQuery;
+      return matchesStatus && matchesType && matchesQuery;
     });
-  }, [invoiceRequests, query, statusFilter]);
+  }, [invoiceRequests, query, statusFilter, typeFilter]);
 
   return (
     <div style={page}>
       <section style={hero}>
         <div>
           <div style={eyebrow}>Zig Business Engine</div>
-          <h1 style={title}>Invoice Requests</h1>
+          <h1 style={title}>Richieste fattura</h1>
           <p style={subtitle}>
-            Gestisci richieste fattura, dati fiscali, VIES, reverse charge,
-            customer tax exempt e collegamento ordine.
+            Controlla le richieste, correggi i dati fiscali e aggiorna lo stato. Tutto è pensato per uso amministrativo semplice.
           </p>
         </div>
-
         <div style={heroIcon}>🧾</div>
       </section>
 
       <section style={statsGrid}>
         <Stat label="Totale" value={stats.total} />
-        <Stat label="Registered" value={stats.registered} tone="info" />
-        <Stat label="Manual review" value={stats.pending} tone="warning" />
-        <Stat label="Completed" value={stats.completed} tone="success" />
-        <Stat label="Rejected" value={stats.rejected} tone="danger" />
+        <Stat label="Registrate" value={stats.registrate} tone="info" />
+        <Stat label="Da controllare" value={stats.pending} tone="warning" />
+        <Stat label="Completate" value={stats.completed} tone="success" />
+        <Stat label="Rifiutate" value={stats.rejected} tone="danger" />
         <Stat label="Reverse charge" value={stats.reverseCharge} tone="success" />
       </section>
 
@@ -206,7 +248,7 @@ export default function InvoiceRequestsPage() {
         <input
           value={query}
           onChange={(event) => setQuery(event.target.value)}
-          placeholder="Search email, company, VAT, order..."
+          placeholder="Cerca email, azienda, VAT, ordine..."
           style={searchInput}
         />
 
@@ -215,228 +257,219 @@ export default function InvoiceRequestsPage() {
           onChange={(event) => setStatusFilter(event.target.value)}
           style={select}
         >
-          <option value="all">All statuses</option>
-          <option value="registered">Registered</option>
-          <option value="pending_review">Manual review</option>
-          <option value="completed">Completed</option>
-          <option value="rejected">Rejected</option>
+          <option value="all">Tutti gli stati</option>
+          <option value="registered">Registrate</option>
+          <option value="pending_review">Da controllare</option>
+          <option value="completed">Completate</option>
+          <option value="rejected">Rifiutate</option>
+        </select>
+
+        <select
+          value={typeFilter}
+          onChange={(event) => setTypeFilter(event.target.value)}
+          style={select}
+        >
+          <option value="all">Tutti i tipi</option>
+          <option value="private">Privati</option>
+          <option value="company_it">Aziende Italia</option>
+          <option value="company_foreign">Aziende estere</option>
+          <option value="incomplete">Incomplete</option>
         </select>
       </section>
 
       <section style={list}>
-        {filtered.map((item) => (
-          <article key={item.id} style={requestCard}>
-            <div style={summaryGrid}>
-              <div>
-                <span style={badge(item.status)}>{statusLabel(item.status)}</span>
-                <span style={typeBadge}>{invoiceTypeLabel(item.invoiceType)}</span>
-              </div>
+        {filtered.map((item) => {
+          const warnings = getWarnings(item);
+          const typeLabel = invoiceTypeLabel(item.invoiceType, item.billingCountry);
 
-              <div>
-                <strong>{item.companyName || item.email || "Invoice request"}</strong>
-                <div style={muted}>{item.vatNumber || "-"}</div>
-              </div>
-
-              <div>
-                <strong>{item.email || "-"}</strong>
-                <div style={muted}>{item.billingCountry || "-"}</div>
-              </div>
-
-              <div>
-                <strong>{item.reverseCharge ? "Reverse charge ✅" : "Reverse charge —"}</strong>
-                <div style={muted}>
-                  Tax exempt {item.taxExemptApplied ? "✅" : "—"}
+          return (
+            <article key={item.id} style={requestCard}>
+              <div style={summaryGrid}>
+                <div>
+                  <span style={badge(item.status)}>{statusLabel(item.status)}</span>
+                  <span style={typeBadge}>{typeLabel}</span>
+                  {warnings.length > 0 && <span style={warningBadge}>Incompleta</span>}
                 </div>
+
+                <div>
+                  <strong>{item.companyName || item.email || "Richiesta fattura"}</strong>
+                  <div style={muted}>{item.vatNumber || "Nessuna VAT"}</div>
+                </div>
+
+                <div>
+                  <strong>{item.email || "Email mancante"}</strong>
+                  <div style={muted}>{item.billingCountry || "Paese non indicato"}</div>
+                </div>
+
+                <div>
+                  <strong>{item.orderName || "Ordine non collegato"}</strong>
+                  <div style={muted}>{formatDate(item.createdAt)}</div>
+                </div>
+
+                <div>
+                  <strong>{item.reverseCharge ? "Reverse charge ✅" : "Reverse charge —"}</strong>
+                  <div style={muted}>Tax exempt {item.taxExemptApplied ? "✅" : "—"}</div>
+                </div>
+
+                <button
+                  type="button"
+                  style={buttonDark}
+                  onClick={() => setOpenId(openId === item.id ? null : item.id)}
+                >
+                  {openId === item.id ? "Chiudi" : "Apri"}
+                </button>
               </div>
 
-              <div>
-                <strong>{item.orderName || "No order yet"}</strong>
-                <div style={muted}>{new Date(item.createdAt).toLocaleString()}</div>
-              </div>
+              {warnings.length > 0 && (
+                <div style={warningBox}>
+                  <strong>Da controllare:</strong> {warnings.join(" · ")}
+                </div>
+              )}
 
-              <button
-                type="button"
-                style={buttonDark}
-                onClick={() => setOpenId(openId === item.id ? null : item.id)}
-              >
-                {openId === item.id ? "Close" : "Open"}
-              </button>
-            </div>
+              {openId === item.id && (
+                <div style={detailBox}>
+                  <Form method="post">
+                    <input type="hidden" name="id" value={item.id} />
 
-            {openId === item.id && (
-              <div style={detailBox}>
-                <Form method="post">
-                  <input type="hidden" name="id" value={item.id} />
+                    <div style={detailGrid}>
+                      <section style={card}>
+                        <h2>Cliente</h2>
 
-                  <div style={detailGrid}>
-                    <section style={card}>
-                      <h2>Customer</h2>
+                        <Field label="Email">
+                          <input name="email" defaultValue={item.email || ""} style={input} />
+                        </Field>
 
-                      <Field label="Email">
-                        <input name="email" defaultValue={item.email || ""} style={input} />
-                      </Field>
+                        <Field label="Nome">
+                          <input name="firstName" defaultValue={item.firstName || ""} style={input} />
+                        </Field>
 
-                      <Field label="First name">
-                        <input
-                          name="firstName"
-                          defaultValue={item.firstName || ""}
-                          style={input}
-                        />
-                      </Field>
+                        <Field label="Cognome">
+                          <input name="lastName" defaultValue={item.lastName || ""} style={input} />
+                        </Field>
 
-                      <Field label="Last name">
-                        <input
-                          name="lastName"
-                          defaultValue={item.lastName || ""}
-                          style={input}
-                        />
-                      </Field>
+                        <Field label="Customer ID">
+                          <input name="customerId" defaultValue={item.customerId || ""} style={input} />
+                        </Field>
+                      </section>
 
-                      <Field label="Customer ID">
-                        <input
-                          name="customerId"
-                          defaultValue={item.customerId || ""}
-                          style={input}
-                        />
-                      </Field>
-                    </section>
+                      <section style={card}>
+                        <h2>Dati fattura</h2>
 
-                    <section style={card}>
-                      <h2>Invoice data</h2>
+                        <Field label="Tipo richiesta">
+                          <select name="invoiceType" defaultValue={item.invoiceType || "private"} style={input}>
+                            <option value="private">Privato</option>
+                            <option value="company">Azienda</option>
+                          </select>
+                        </Field>
 
-                      <Field label="Invoice type">
-                        <select
-                          name="invoiceType"
-                          defaultValue={item.invoiceType || "private"}
-                          style={input}
-                        >
-                          <option value="private">Private</option>
-                          <option value="company">Company</option>
-                        </select>
-                      </Field>
+                        <Field label="Ragione sociale">
+                          <input name="companyName" defaultValue={item.companyName || ""} style={input} />
+                        </Field>
 
-                      <Field label="Company name">
-                        <input
-                          name="companyName"
-                          defaultValue={item.companyName || ""}
-                          style={input}
-                        />
-                      </Field>
+                        <Field label="Partita IVA / VAT">
+                          <input name="vatNumber" defaultValue={item.vatNumber || ""} style={input} />
+                        </Field>
 
-                      <Field label="VAT number">
-                        <input
-                          name="vatNumber"
-                          defaultValue={item.vatNumber || ""}
-                          style={input}
-                        />
-                      </Field>
+                        <Field label="Paese">
+                          <input name="billingCountry" defaultValue={item.billingCountry || ""} style={input} />
+                        </Field>
 
-                      <Field label="Billing country">
-                        <input
-                          name="billingCountry"
-                          defaultValue={item.billingCountry || ""}
-                          style={input}
-                        />
-                      </Field>
+                        <Field label="PEC">
+                          <input name="pec" defaultValue={item.pec || ""} style={input} />
+                        </Field>
 
-                      <Field label="PEC">
-                        <input name="pec" defaultValue={item.pec || ""} style={input} />
-                      </Field>
+                        <Field label="Codice destinatario / SDI">
+                          <input
+                            name="codiceDestinatario"
+                            defaultValue={item.codiceDestinatario || ""}
+                            style={input}
+                          />
+                        </Field>
+                      </section>
 
-                      <Field label="Codice destinatario / SDI">
-                        <input
-                          name="codiceDestinatario"
-                          defaultValue={item.codiceDestinatario || ""}
-                          style={input}
-                        />
-                      </Field>
-                    </section>
+                      <section style={card}>
+                        <h2>Controlli fiscali</h2>
 
-                    <section style={card}>
-                      <h2>VIES / Tax</h2>
+                        <Read label="VIES controllato" value={item.viesChecked ? "Sì" : "No"} />
+                        <Read label="VIES valido" value={item.viesValid ? "✅ Valido" : "—"} />
+                        <Read label="Azienda VIES" value={item.viesCompanyName || "-"} />
 
-                      <Read label="VIES checked" value={item.viesChecked ? "Yes" : "No"} />
-                      <Read label="VIES valid" value={item.viesValid ? "✅ Valid" : "—"} />
-                      <Read label="VIES company" value={item.viesCompanyName || "-"} />
+                        <div style={{ marginTop: 12 }}>
+                          <strong>Indirizzo VIES</strong>
+                          <pre style={pre}>{item.viesAddress || "-"}</pre>
+                        </div>
 
-                      <div style={{ marginTop: 12 }}>
-                        <strong>VIES address</strong>
-                        <pre style={pre}>{item.viesAddress || "-"}</pre>
-                      </div>
+                        <Read label="Reverse charge" value={item.reverseCharge ? "✅ Sì" : "—"} />
+                        <Read label="Tax exempt" value={item.taxExemptApplied ? "✅ Sì" : "—"} />
+                      </section>
 
-                      <Read
-                        label="Reverse charge"
-                        value={item.reverseCharge ? "✅ Yes" : "—"}
-                      />
-                      <Read
-                        label="Tax exempt applied"
-                        value={item.taxExemptApplied ? "✅ Yes" : "—"}
-                      />
-                    </section>
+                      <section style={card}>
+                        <h2>Ordine</h2>
 
-                    <section style={card}>
-                      <h2>Order / Tokens</h2>
+                        <Field label="Order ID">
+                          <input name="orderId" defaultValue={item.orderId || ""} style={input} />
+                        </Field>
 
-                      <Field label="Order ID">
-                        <input name="orderId" defaultValue={item.orderId || ""} style={input} />
-                      </Field>
+                        <Field label="Nome ordine">
+                          <input name="orderName" defaultValue={item.orderName || ""} style={input} />
+                        </Field>
 
-                      <Field label="Order name">
-                        <input
-                          name="orderName"
-                          defaultValue={item.orderName || ""}
-                          style={input}
-                        />
-                      </Field>
+                        <Field label="Checkout token">
+                          <input name="checkoutToken" defaultValue={item.checkoutToken || ""} style={input} />
+                        </Field>
 
-                      <Field label="Checkout token">
-                        <input
-                          name="checkoutToken"
-                          defaultValue={item.checkoutToken || ""}
-                          style={input}
-                        />
-                      </Field>
-
-                      <Read label="Cart token" value={item.cartToken || "-"} />
-                      <Read label="Created" value={new Date(item.createdAt).toLocaleString()} />
-                      <Read label="Updated" value={new Date(item.updatedAt).toLocaleString()} />
-                    </section>
-                  </div>
-
-                  <section style={{ ...card, marginTop: 16 }}>
-                    <h2>Actions</h2>
-
-                    <div style={actions}>
-                      <button name="intent" value="save" style={buttonGrey}>
-                        Save edits
-                      </button>
-
-                      <button name="intent" value="registered" style={buttonBlue}>
-                        Registered
-                      </button>
-
-                      <button name="intent" value="pending" style={buttonYellow}>
-                        Manual review
-                      </button>
-
-                      <button name="intent" value="completed" style={buttonGreen}>
-                        Completed
-                      </button>
-
-                      <button name="intent" value="reject" style={buttonRed}>
-                        Reject
-                      </button>
+                        <Read label="Cart token" value={item.cartToken || "-"} />
+                        <Read label="Creata il" value={formatDate(item.createdAt)} />
+                        <Read label="Aggiornata il" value={formatDate(item.updatedAt)} />
+                      </section>
                     </div>
-                  </section>
-                </Form>
-              </div>
-            )}
-          </article>
-        ))}
 
-        {!filtered.length && (
-          <div style={emptyState}>Nessuna richiesta fattura trovata.</div>
-        )}
+                    <section style={{ ...card, marginTop: 16 }}>
+                      <h2>Azioni</h2>
+
+                      <div style={statusActions}>
+                        <button name="intent" value="save" style={buttonGrey}>
+                          Salva modifiche
+                        </button>
+
+                        <button name="intent" value="registered" style={buttonBlue}>
+                          Registrata
+                        </button>
+
+                        <button name="intent" value="pending_review" style={buttonYellow}>
+                          Da controllare
+                        </button>
+
+                        <button name="intent" value="completed" style={buttonGreen}>
+                          Completata
+                        </button>
+
+                        <button name="intent" value="rejected" style={buttonRed}>
+                          Rifiutata
+                        </button>
+
+                        <button
+                          name="intent"
+                          value="delete"
+                          style={buttonDangerOutline}
+                          onClick={(event) => {
+                            if (!window.confirm("Vuoi eliminare definitivamente questa richiesta?")) {
+                              event.preventDefault();
+                            }
+                          }}
+                        >
+                          Cancella riga
+                        </button>
+                      </div>
+                    </section>
+                  </Form>
+                </div>
+              )}
+            </article>
+          );
+        })}
+
+        {!filtered.length && <div style={emptyState}>Nessuna richiesta fattura trovata.</div>}
       </section>
     </div>
   );
@@ -517,24 +550,24 @@ const eyebrow: CSSProperties = {
 
 const title: CSSProperties = {
   margin: 0,
-  fontSize: "clamp(42px, 6vw, 72px)",
-  lineHeight: ".92",
+  fontSize: "clamp(38px, 5vw, 64px)",
+  lineHeight: ".95",
   fontWeight: 950,
 };
 
 const subtitle: CSSProperties = {
   maxWidth: 760,
-  fontSize: 18,
+  fontSize: 17,
   lineHeight: 1.45,
-  marginTop: 18,
+  marginTop: 16,
 };
 
 const heroIcon: CSSProperties = {
-  fontSize: 82,
+  fontSize: 72,
   background: "rgba(248,243,223,.78)",
-  width: 160,
-  height: 160,
-  borderRadius: 34,
+  width: 140,
+  height: 140,
+  borderRadius: 30,
   display: "flex",
   alignItems: "center",
   justifyContent: "center",
@@ -555,7 +588,7 @@ const statCard: CSSProperties = {
 };
 
 const statValue: CSSProperties = {
-  fontSize: 34,
+  fontSize: 32,
   fontWeight: 950,
   lineHeight: 1,
 };
@@ -568,7 +601,7 @@ const statLabel: CSSProperties = {
 
 const toolbar: CSSProperties = {
   display: "grid",
-  gridTemplateColumns: "1fr 220px",
+  gridTemplateColumns: "1fr 210px 210px",
   gap: 12,
   marginTop: 20,
 };
@@ -579,6 +612,7 @@ const searchInput: CSSProperties = {
   borderRadius: 999,
   padding: "0 18px",
   fontSize: 15,
+  background: "white",
 };
 
 const select: CSSProperties = {
@@ -600,7 +634,7 @@ const requestCard: CSSProperties = {
 
 const summaryGrid: CSSProperties = {
   display: "grid",
-  gridTemplateColumns: "170px 1.2fr 1.2fr 1fr 1fr auto",
+  gridTemplateColumns: "210px 1.15fr 1.15fr 1fr 1fr auto",
   gap: 14,
   alignItems: "center",
   padding: 18,
@@ -615,6 +649,7 @@ function badge(status: string): CSSProperties {
     fontWeight: 900,
     fontSize: 13,
     marginRight: 6,
+    marginBottom: 6,
   };
 }
 
@@ -625,6 +660,29 @@ const typeBadge: CSSProperties = {
   padding: "7px 11px",
   fontWeight: 900,
   fontSize: 13,
+  marginRight: 6,
+  marginBottom: 6,
+};
+
+const warningBadge: CSSProperties = {
+  display: "inline-flex",
+  background: "#fff3cd",
+  color: "#5f3b00",
+  borderRadius: 999,
+  padding: "7px 11px",
+  fontWeight: 900,
+  fontSize: 13,
+  marginBottom: 6,
+};
+
+const warningBox: CSSProperties = {
+  margin: "0 18px 16px",
+  padding: "12px 14px",
+  background: "#fff8df",
+  border: "1px solid #f3d27a",
+  borderRadius: 16,
+  color: "#5f3b00",
+  fontSize: 14,
 };
 
 const muted: CSSProperties = {
@@ -658,6 +716,7 @@ const input: CSSProperties = {
   border: "1px solid #ddd",
   borderRadius: 999,
   padding: "0 14px",
+  background: "white",
 };
 
 const pre: CSSProperties = {
@@ -667,9 +726,9 @@ const pre: CSSProperties = {
   borderRadius: 12,
 };
 
-const actions: CSSProperties = {
+const statusActions: CSSProperties = {
   display: "grid",
-  gridTemplateColumns: "repeat(5, 1fr)",
+  gridTemplateColumns: "repeat(6, 1fr)",
   gap: 10,
 };
 
@@ -716,6 +775,13 @@ const buttonRed: CSSProperties = {
   ...buttonBase,
   background: "#9f2f1f",
   color: "white",
+};
+
+const buttonDangerOutline: CSSProperties = {
+  ...buttonBase,
+  background: "white",
+  color: "#9f2f1f",
+  border: "1px solid #9f2f1f",
 };
 
 const emptyState: CSSProperties = {

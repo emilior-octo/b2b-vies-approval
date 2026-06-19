@@ -608,6 +608,125 @@ function statusColor(status: string) {
   return "#fff3cd";
 }
 
+
+function ApplicationDetailPanel({ app }: any) {
+  return (
+    <div style={detailBox}>
+      <Form method="post">
+        <input type="hidden" name="id" value={app.id} />
+
+        <div style={statusPill(app.status)}>{statusLabel(app.status)}</div>
+
+        <div style={grid}>
+          <section style={card}>
+            <h2>Submitted data</h2>
+
+            <Field label="Company name">
+              <input
+                name="companyNameSubmitted"
+                defaultValue={app.companyNameSubmitted || ""}
+                style={input}
+              />
+            </Field>
+
+            <Field label="VAT number">
+              <input
+                name="vatNumberSubmitted"
+                defaultValue={app.vatNumberSubmitted || ""}
+                style={input}
+              />
+            </Field>
+
+            <Field label="Email">
+              <input name="email" defaultValue={app.email || ""} style={input} />
+            </Field>
+
+            <Field label="First name">
+              <input name="firstName" defaultValue={app.firstName || ""} style={input} />
+            </Field>
+
+            <Field label="Last name">
+              <input name="lastName" defaultValue={app.lastName || ""} style={input} />
+            </Field>
+
+            <Field label="Billing country">
+              <input
+                name="billingCountry"
+                defaultValue={app.billingCountry || ""}
+                style={input}
+              />
+            </Field>
+
+            <Field label="PEC">
+              <input name="pec" defaultValue={app.pec || ""} style={input} />
+            </Field>
+
+            <Field label="Codice destinatario">
+              <input
+                name="codiceDestinatario"
+                defaultValue={app.codiceDestinatario || ""}
+                style={input}
+              />
+            </Field>
+          </section>
+
+          <section style={card}>
+            <h2>VIES data</h2>
+
+            <Read label="VIES valid" value={app.viesValid ? "✅ Valid" : "❌ Invalid"} />
+            <Read label="VIES company" value={app.viesCompanyName || "-"} />
+            <Read label="VIES VAT" value={app.viesVatNumber || "-"} />
+            <Read label="VIES country" value={app.viesCountryCode || "-"} />
+
+            <div style={{ marginTop: 12 }}>
+              <strong>VIES address</strong>
+              <pre style={pre}>{app.viesAddress || "-"}</pre>
+            </div>
+
+            <Read label="Match score" value={`${app.matchScore ?? "-"}%`} />
+          </section>
+        </div>
+
+        <section style={{ ...card, marginTop: 16 }}>
+          <h2>Shopify sync</h2>
+          <Read label="Customer ID" value={app.shopifyCustomerId || "-"} />
+          <Read label="Company ID" value={app.shopifyCompanyId || "-"} />
+          <Read label="Company location ID" value={app.shopifyCompanyLocationId || "-"} />
+        </section>
+
+        <section style={{ ...card, marginTop: 16 }}>
+          <h2>Review notes</h2>
+
+          <textarea
+            name="reviewNotes"
+            defaultValue={app.reviewNotes || ""}
+            rows={4}
+            style={{ ...input, minHeight: 100, borderRadius: 14, paddingTop: 12 }}
+          />
+
+          <div style={actions}>
+            <button name="intent" value="save" style={buttonGrey}>
+              Save edits
+            </button>
+
+            <button name="intent" value="approve" style={buttonGreen}>
+              Approve + create company
+            </button>
+
+            <button name="intent" value="pending" style={buttonYellow}>
+              Pending
+            </button>
+
+            <button name="intent" value="reject" style={buttonRed}>
+              Reject
+            </button>
+          </div>
+        </section>
+      </Form>
+    </div>
+  );
+}
+
 export default function ApplicationsPage() {
   const { applications } = useLoaderData<typeof loader>();
   const [openId, setOpenId] = useState<string | null>(null);
@@ -636,24 +755,34 @@ export default function ApplicationsPage() {
 
         <tbody>
           {applications.map((app) => (
-            <tr key={app.id}>
-              <td style={td}>{statusLabel(app.status)}</td>
-              <td style={td}>{app.companyNameSubmitted || "-"}</td>
-              <td style={td}>{app.vatNumberSubmitted}</td>
-              <td style={td}>{app.email}</td>
-              <td style={td}>{app.matchScore ?? "-"}%</td>
-              <td style={td}>{app.viesValid ? "Valid" : "Invalid"}</td>
-              <td style={td}>{new Date(app.createdAt).toLocaleString()}</td>
-              <td style={td}>
-                <button
-                  type="button"
-                  style={buttonDark}
-                  onClick={() => setOpenId(openId === app.id ? null : app.id)}
-                >
-                  {openId === app.id ? "Close" : "Open"}
-                </button>
-              </td>
-            </tr>
+            <>
+              <tr key={app.id}>
+                <td style={td}>{statusLabel(app.status)}</td>
+                <td style={td}>{app.companyNameSubmitted || "-"}</td>
+                <td style={td}>{app.vatNumberSubmitted}</td>
+                <td style={td}>{app.email}</td>
+                <td style={td}>{app.matchScore ?? "-"}%</td>
+                <td style={td}>{app.viesValid ? "Valid" : "Invalid"}</td>
+                <td style={td}>{new Date(app.createdAt).toLocaleString()}</td>
+                <td style={td}>
+                  <button
+                    type="button"
+                    style={buttonDark}
+                    onClick={() => setOpenId(openId === app.id ? null : app.id)}
+                  >
+                    {openId === app.id ? "Close" : "Open"}
+                  </button>
+                </td>
+              </tr>
+
+              {openId === app.id && (
+                <tr key={`${app.id}-detail-row`}>
+                  <td colSpan={8} style={{ padding: 0, borderBottom: "1px solid #ddd" }}>
+                    <ApplicationDetailPanel app={app} />
+                  </td>
+                </tr>
+              )}
+            </>
           ))}
 
           {!applications.length && (
@@ -665,138 +794,10 @@ export default function ApplicationsPage() {
           )}
         </tbody>
       </table>
-
-      {applications.map((app) =>
-        openId === app.id ? (
-          <div key={`${app.id}-detail`} style={detailBox}>
-            <Form method="post">
-              <input type="hidden" name="id" value={app.id} />
-
-              <div style={statusPill(app.status)}>{statusLabel(app.status)}</div>
-
-              <div style={grid}>
-                <section style={card}>
-                  <h2>Submitted data</h2>
-
-                  <Field label="Company name">
-                    <input
-                      name="companyNameSubmitted"
-                      defaultValue={app.companyNameSubmitted || ""}
-                      style={input}
-                    />
-                  </Field>
-
-                  <Field label="VAT number">
-                    <input
-                      name="vatNumberSubmitted"
-                      defaultValue={app.vatNumberSubmitted || ""}
-                      style={input}
-                    />
-                  </Field>
-
-                  <Field label="Email">
-                    <input name="email" defaultValue={app.email || ""} style={input} />
-                  </Field>
-
-                  <Field label="First name">
-                    <input
-                      name="firstName"
-                      defaultValue={app.firstName || ""}
-                      style={input}
-                    />
-                  </Field>
-
-                  <Field label="Last name">
-                    <input
-                      name="lastName"
-                      defaultValue={app.lastName || ""}
-                      style={input}
-                    />
-                  </Field>
-
-                  <Field label="Billing country">
-                    <input
-                      name="billingCountry"
-                      defaultValue={app.billingCountry || ""}
-                      style={input}
-                    />
-                  </Field>
-
-                  <Field label="PEC">
-                    <input name="pec" defaultValue={app.pec || ""} style={input} />
-                  </Field>
-
-                  <Field label="Codice destinatario">
-                    <input
-                      name="codiceDestinatario"
-                      defaultValue={app.codiceDestinatario || ""}
-                      style={input}
-                    />
-                  </Field>
-                </section>
-
-                <section style={card}>
-                  <h2>VIES data</h2>
-
-                  <Read label="VIES valid" value={app.viesValid ? "✅ Valid" : "❌ Invalid"} />
-                  <Read label="VIES company" value={app.viesCompanyName || "-"} />
-                  <Read label="VIES VAT" value={app.viesVatNumber || "-"} />
-                  <Read label="VIES country" value={app.viesCountryCode || "-"} />
-
-                  <div style={{ marginTop: 12 }}>
-                    <strong>VIES address</strong>
-                    <pre style={pre}>{app.viesAddress || "-"}</pre>
-                  </div>
-
-                  <Read label="Match score" value={`${app.matchScore ?? "-"}%`} />
-                </section>
-              </div>
-
-              <section style={{ ...card, marginTop: 16 }}>
-                <h2>Shopify sync</h2>
-                <Read label="Customer ID" value={app.shopifyCustomerId || "-"} />
-                <Read label="Company ID" value={app.shopifyCompanyId || "-"} />
-                <Read
-                  label="Company location ID"
-                  value={app.shopifyCompanyLocationId || "-"}
-                />
-              </section>
-
-              <section style={{ ...card, marginTop: 16 }}>
-                <h2>Review notes</h2>
-
-                <textarea
-                  name="reviewNotes"
-                  defaultValue={app.reviewNotes || ""}
-                  rows={4}
-                  style={{ ...input, minHeight: 100, borderRadius: 14, paddingTop: 12 }}
-                />
-
-                <div style={actions}>
-                  <button name="intent" value="save" style={buttonGrey}>
-                    Save edits
-                  </button>
-
-                  <button name="intent" value="approve" style={buttonGreen}>
-                    Approve + create company
-                  </button>
-
-                  <button name="intent" value="pending" style={buttonYellow}>
-                    Pending
-                  </button>
-
-                  <button name="intent" value="reject" style={buttonRed}>
-                    Reject
-                  </button>
-                </div>
-              </section>
-            </Form>
-          </div>
-        ) : null,
-      )}
     </div>
   );
 }
+
 
 function Field({ label, children }: any) {
   return (
