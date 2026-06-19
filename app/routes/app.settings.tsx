@@ -71,13 +71,13 @@ async function createDefinition(admin: any, definition: Definition) {
       }
     `,
     {
-definition: {
-  name: definition.name,
-  namespace: definition.namespace,
-  key: definition.key,
-  type: definition.type,
-  ownerType: definition.ownerType,
-},
+    
+      definition: {
+        name: definition.name,
+        namespace: definition.namespace,
+        key: definition.key,
+        type: definition.type,
+        ownerType: definition.ownerType,
       },
     },
   );
