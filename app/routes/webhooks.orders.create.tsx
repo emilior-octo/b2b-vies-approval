@@ -1,14 +1,61 @@
 import { authenticate, unauthenticated } from "../shopify.server";
 import db from "../db.server";
 
+const FISCAL_CODE_KEYS = [
+  "fiscal_code",
+  "fiscalCode",
+  "codice_fiscale",
+  "codice fiscale",
+  "codiceFiscale",
+  "Codice fiscale",
+  "Codice Fiscale",
+];
+
+const PEC_KEYS = ["pec", "PEC", "certified_email", "certifiedEmail"];
+
+const SDI_KEYS = [
+  "sdi",
+  "SDI",
+  "codice_sdi",
+  "recipient_code",
+  "codice_destinatario",
+  "codice destinatario",
+];
+
+const VAT_KEYS = ["vat_number", "VAT", "vatNumber", "partita_iva", "Partita IVA"];
+const COMPANY_KEYS = ["company_name", "companyName", "ragione_sociale", "Ragione sociale"];
+
+function normalize(value: any) {
+  return String(value || "").trim();
+}
+
+function getAllAttributes(order: any) {
+  return [
+    ...(order?.note_attributes || []),
+    ...(order?.noteAttributes || []),
+    ...(order?.custom_attributes || []),
+    ...(order?.customAttributes || []),
+  ];
+}
+
 function getAttr(order: any, key: string) {
-  const attrs = order?.note_attributes || order?.noteAttributes || [];
+  const attrs = getAllAttributes(order);
   const found = attrs.find((item: any) => item.name === key || item.key === key);
-  return String(found?.value || "").trim();
+  return normalize(found?.value);
+}
+
+function getAttrAny(order: any, keys: string[]) {
+  for (const key of keys) {
+    const value = getAttr(order, key);
+    if (value) return value;
+  }
+
+  return "";
 }
 
 function yes(value: string) {
-  return value === "true" || value === "1" || value === "yes";
+  const normalized = normalize(value).toLowerCase();
+  return normalized === "true" || normalized === "1" || normalized === "yes";
 }
 
 async function graphQL(admin: any, query: string, variables: any = {}) {
@@ -57,7 +104,7 @@ async function setOrderMetafields(
   metafieldsToWrite: Record<string, string>,
 ) {
   const metafields = Object.entries(metafieldsToWrite)
-    .filter(([, value]) => String(value || "").trim() !== "")
+    .filter(([, value]) => normalize(value) !== "")
     .map(([fullKey, value]) => {
       const [namespace, key] = fullKey.split(".");
 
@@ -69,7 +116,7 @@ async function setOrderMetafields(
           key === "fiscal_note" || key === "vies_address"
             ? "multi_line_text_field"
             : "single_line_text_field",
-        value: String(value || "").trim(),
+        value: normalize(value),
       };
     });
 
@@ -142,34 +189,170 @@ async function getCustomerB2BData(admin: any, customerGid: string) {
   };
 }
 
-function buildInvoiceNote(order: any) {
+async function getCustomerCustomFiscalData(admin: any, customerGid: string) {
+  if (!customerGid) return null;
+
+  const data = await graphQL(
+    admin,
+    `#graphql
+      query CustomerCustomFiscalData($id: ID!) {
+        customer(id: $id) {
+          id
+          email
+          fiscalCode: metafield(namespace: "custom", key: "fiscal_code") { value }
+          pec: metafield(namespace: "custom", key: "pec") { value }
+          sdi: metafield(namespace: "custom", key: "sdi") { value }
+          vatNumber: metafield(namespace: "custom", key: "vat_number") { value }
+          invoiceCountryCode: metafield(namespace: "custom", key: "invoice_country_code") { value }
+          companyName: metafield(namespace: "custom", key: "company_name") { value }
+          invoiceType: metafield(namespace: "custom", key: "invoice_type") { value }
+          viesChecked: metafield(namespace: "custom", key: "vies_checked") { value }
+          viesValid: metafield(namespace: "custom", key: "vies_valid") { value }
+          reverseCharge: metafield(namespace: "custom", key: "reverse_charge") { value }
+        }
+      }
+    `,
+    { id: customerGid },
+  );
+
+  const customer = data?.data?.customer;
+  if (!customer) return null;
+
+  return {
+    customer,
+    fiscalCode: normalize(customer.fiscalCode?.value),
+    pec: normalize(customer.pec?.value),
+    sdi: normalize(customer.sdi?.value),
+    vatNumber: normalize(customer.vatNumber?.value),
+    invoiceCountryCode: normalize(customer.invoiceCountryCode?.value),
+    companyName: normalize(customer.companyName?.value),
+    invoiceType: normalize(customer.invoiceType?.value),
+    viesChecked: normalize(customer.viesChecked?.value),
+    viesValid: normalize(customer.viesValid?.value),
+    reverseCharge: normalize(customer.reverseCharge?.value),
+  };
+}
+
+async function getInvoiceRequestFromDb(invoiceRequestId: string) {
+  if (!invoiceRequestId) return null;
+
+  try {
+    return await db.invoiceRequest.findUnique({
+      where: { id: invoiceRequestId },
+    });
+  } catch (_error) {
+    return null;
+  }
+}
+
+function buildInvoiceNote({
+  order,
+  dbRequest,
+  customerFiscalData,
+}: {
+  order: any;
+  dbRequest?: any;
+  customerFiscalData?: any;
+}) {
   const invoiceRequested = getAttr(order, "invoice_requested");
   if (!yes(invoiceRequested)) return null;
 
-  const invoiceType = getAttr(order, "invoice_type");
-  const invoiceRequestId = getAttr(order, "invoice_request_id");
-  const companyName = getAttr(order, "company_name");
-  const vatNumber = getAttr(order, "vat_number");
-  const country = getAttr(order, "invoice_country_code");
-  const pec = getAttr(order, "pec");
-  const sdi = getAttr(order, "sdi");
-  const customerEmail = getAttr(order, "customer_email");
-  const viesChecked = getAttr(order, "vies_checked");
-  const viesValid = getAttr(order, "vies_valid");
-  const reverseCharge = getAttr(order, "reverse_charge");
-  const taxExemptApplied = getAttr(order, "tax_exempt_applied");
+  const invoiceType =
+    getAttr(order, "invoice_type") ||
+    customerFiscalData?.invoiceType ||
+    dbRequest?.invoiceType ||
+    "private";
+
+  const invoiceRequestId = getAttr(order, "invoice_request_id") || dbRequest?.id || "";
+
+  const fiscalCode =
+    getAttrAny(order, FISCAL_CODE_KEYS) ||
+    customerFiscalData?.fiscalCode ||
+    "";
+
+  const pec =
+    getAttrAny(order, PEC_KEYS) ||
+    customerFiscalData?.pec ||
+    dbRequest?.pec ||
+    "";
+
+  const sdi =
+    getAttrAny(order, SDI_KEYS) ||
+    customerFiscalData?.sdi ||
+    dbRequest?.codiceDestinatario ||
+    "";
+
+  const companyName =
+    getAttrAny(order, COMPANY_KEYS) ||
+    customerFiscalData?.companyName ||
+    dbRequest?.companyName ||
+    "";
+
+  const vatNumber =
+    getAttrAny(order, VAT_KEYS) ||
+    customerFiscalData?.vatNumber ||
+    dbRequest?.vatNumber ||
+    "";
+
+  const country =
+    getAttr(order, "invoice_country_code") ||
+    customerFiscalData?.invoiceCountryCode ||
+    dbRequest?.billingCountry ||
+    "";
+
+  const customerEmail =
+    getAttr(order, "customer_email") ||
+    customerFiscalData?.customer?.email ||
+    dbRequest?.email ||
+    order.email ||
+    "";
+
+  const viesChecked =
+    getAttr(order, "vies_checked") ||
+    customerFiscalData?.viesChecked ||
+    (dbRequest?.viesChecked === true ? "true" : dbRequest?.viesChecked === false ? "false" : "");
+
+  const viesValid =
+    getAttr(order, "vies_valid") ||
+    customerFiscalData?.viesValid ||
+    (dbRequest?.viesValid === true ? "true" : dbRequest?.viesValid === false ? "false" : "");
+
+  const reverseCharge =
+    getAttr(order, "reverse_charge") ||
+    customerFiscalData?.reverseCharge ||
+    (dbRequest?.reverseCharge === true ? "true" : dbRequest?.reverseCharge === false ? "false" : "");
+
+  const taxExemptApplied =
+    getAttr(order, "tax_exempt_applied") ||
+    (dbRequest?.taxExemptApplied === true ? "true" : dbRequest?.taxExemptApplied === false ? "false" : "");
+
   const taxExemptPrepared = getAttr(order, "tax_exempt_customer_prepared");
+
+  if (invoiceType === "private") {
+    return [
+      "=== INVOICE REQUEST ===",
+      "",
+      "Type: Private invoice",
+      fiscalCode ? `Fiscal code: ${fiscalCode}` : "Fiscal code: -",
+      pec ? `PEC: ${pec}` : "PEC: -",
+      "",
+      `Customer email: ${customerEmail || "-"}`,
+      "",
+      `Invoice Request ID: ${invoiceRequestId || "-"}`,
+      "=======================",
+    ].join("\n");
+  }
 
   return [
     "=== INVOICE REQUEST ===",
     "",
-    `Type: ${invoiceType || "-"}`,
+    "Type: Company invoice",
     `Company: ${companyName || "-"}`,
     `VAT: ${vatNumber || "-"}`,
     `Country: ${country || "-"}`,
     `PEC: ${pec || "-"}`,
     `SDI: ${sdi || "-"}`,
-    `Customer email: ${customerEmail || order.email || "-"}`,
+    `Customer email: ${customerEmail || "-"}`,
     "",
     `VIES checked: ${viesChecked || "-"}`,
     `VIES valid: ${viesValid || "-"}`,
@@ -205,7 +388,7 @@ function buildB2BFiscalNote(order: any, b2bData: any) {
 }
 
 function appendNote(existingNote: string, block: string, marker: string) {
-  const current = String(existingNote || "").trim();
+  const current = normalize(existingNote);
 
   if (current.includes(marker)) return current;
 
@@ -227,11 +410,24 @@ export const action = async ({ request }: any) => {
     const invoiceRequested = yes(getAttr(order, "invoice_requested"));
     const invoiceRequestId = getAttr(order, "invoice_request_id");
 
-    let nextNote = String(order.note || "").trim();
-    const tags = [];
+    const customerGid =
+      order.customer?.admin_graphql_api_id ||
+      (order.customer?.id ? `gid://shopify/Customer/${order.customer.id}` : "");
+
+    let nextNote = normalize(order.note);
+    const tags: string[] = [];
 
     if (invoiceRequested) {
-      const fiscalNote = buildInvoiceNote(order);
+      const [customerFiscalData, dbRequest] = await Promise.all([
+        customerGid ? getCustomerCustomFiscalData(admin, customerGid) : Promise.resolve(null),
+        getInvoiceRequestFromDb(invoiceRequestId),
+      ]);
+
+      const fiscalNote = buildInvoiceNote({
+        order,
+        dbRequest,
+        customerFiscalData,
+      });
 
       if (invoiceRequestId) {
         await db.invoiceRequest.updateMany({
@@ -239,7 +435,12 @@ export const action = async ({ request }: any) => {
           data: {
             orderId: orderGid,
             orderName: order.name || null,
-            email: order.email || getAttr(order, "customer_email") || null,
+            email:
+              order.email ||
+              getAttr(order, "customer_email") ||
+              customerFiscalData?.customer?.email ||
+              dbRequest?.email ||
+              null,
             status: "completed",
           },
         });
@@ -249,32 +450,44 @@ export const action = async ({ request }: any) => {
         nextNote = appendNote(nextNote, fiscalNote, "=== INVOICE REQUEST ===");
       }
 
+      const fiscalCode =
+        getAttrAny(order, FISCAL_CODE_KEYS) || customerFiscalData?.fiscalCode || "";
+      const pec =
+        getAttrAny(order, PEC_KEYS) || customerFiscalData?.pec || dbRequest?.pec || "";
+      const sdi =
+        getAttrAny(order, SDI_KEYS) || customerFiscalData?.sdi || dbRequest?.codiceDestinatario || "";
+      const vatNumber =
+        getAttrAny(order, VAT_KEYS) || customerFiscalData?.vatNumber || dbRequest?.vatNumber || "";
+      const companyName =
+        getAttrAny(order, COMPANY_KEYS) || customerFiscalData?.companyName || dbRequest?.companyName || "";
+      const country =
+        getAttr(order, "invoice_country_code") || customerFiscalData?.invoiceCountryCode || dbRequest?.billingCountry || "";
+      const invoiceType =
+        getAttr(order, "invoice_type") || customerFiscalData?.invoiceType || dbRequest?.invoiceType || "";
+
       tags.push("invoice_request");
 
-      if (yes(getAttr(order, "reverse_charge"))) tags.push("reverse_charge");
-      if (yes(getAttr(order, "vies_valid"))) tags.push("vies_valid");
-      if (getAttr(order, "invoice_request_status") === "pending_review") {
+      if (yes(getAttr(order, "reverse_charge")) || dbRequest?.reverseCharge) tags.push("reverse_charge");
+      if (yes(getAttr(order, "vies_valid")) || dbRequest?.viesValid) tags.push("vies_valid");
+      if (getAttr(order, "invoice_request_status") === "pending_review" || dbRequest?.status === "pending_review") {
         tags.push("invoice_pending_review");
       }
 
       await setOrderMetafields(admin, orderGid, {
         "invoice.request_id": invoiceRequestId,
-        "invoice.invoice_type": getAttr(order, "invoice_type"),
-        "invoice.company_name": getAttr(order, "company_name"),
-        "invoice.vat_number": getAttr(order, "vat_number"),
-        "invoice.billing_country": getAttr(order, "invoice_country_code"),
-        "invoice.pec": getAttr(order, "pec"),
-        "invoice.codice_destinatario": getAttr(order, "sdi"),
-        "invoice.vies_valid": getAttr(order, "vies_valid"),
-        "invoice.reverse_charge": getAttr(order, "reverse_charge"),
-        "invoice.tax_exempt_applied": getAttr(order, "tax_exempt_applied"),
+        "invoice.invoice_type": invoiceType,
+        "invoice.fiscal_code": fiscalCode,
+        "invoice.company_name": companyName,
+        "invoice.vat_number": vatNumber,
+        "invoice.billing_country": country,
+        "invoice.pec": pec,
+        "invoice.codice_destinatario": sdi,
+        "invoice.vies_valid": getAttr(order, "vies_valid") || customerFiscalData?.viesValid || (dbRequest?.viesValid === true ? "true" : dbRequest?.viesValid === false ? "false" : ""),
+        "invoice.reverse_charge": getAttr(order, "reverse_charge") || customerFiscalData?.reverseCharge || (dbRequest?.reverseCharge === true ? "true" : dbRequest?.reverseCharge === false ? "false" : ""),
+        "invoice.tax_exempt_applied": getAttr(order, "tax_exempt_applied") || (dbRequest?.taxExemptApplied === true ? "true" : dbRequest?.taxExemptApplied === false ? "false" : ""),
         "invoice.fiscal_note": fiscalNote || "",
       });
     }
-
-    const customerGid =
-      order.customer?.admin_graphql_api_id ||
-      (order.customer?.id ? `gid://shopify/Customer/${order.customer.id}` : "");
 
     if (!invoiceRequested && customerGid) {
       const b2bData = await getCustomerB2BData(admin, customerGid);
@@ -301,7 +514,7 @@ export const action = async ({ request }: any) => {
       }
     }
 
-    if (nextNote && nextNote !== String(order.note || "").trim()) {
+    if (nextNote && nextNote !== normalize(order.note)) {
       await updateOrderNote(admin, orderGid, nextNote);
     }
 
