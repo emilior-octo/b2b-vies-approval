@@ -10,6 +10,7 @@ import {
 
 const DEFAULT_SHOP = "zig-italia-frutta-secca-e-semi.myshopify.com";
 const SHOP_COUNTRY = "IT";
+const VIES_NAME_UNAVAILABLE_COUNTRIES = ["DE"];
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -44,14 +45,6 @@ async function findCustomerByEmail(admin: any, email: string) {
             id
             email
             taxExempt
-            tags
-            companyContactProfiles {
-              id
-              company {
-                id
-                name
-              }
-            }
           }
         }
       }
@@ -62,16 +55,54 @@ async function findCustomerByEmail(admin: any, email: string) {
   return data?.data?.customers?.nodes?.[0] || null;
 }
 
-async function createOrUpdateInvoiceCustomer({
+async function setOwnerMetafields(
+  admin: any,
+  ownerId: string,
+  metafieldsToWrite: Record<string, string>,
+) {
+  const metafields = Object.entries(metafieldsToWrite)
+    .filter(([, value]) => String(value ?? "").trim() !== "")
+    .map(([fullKey, value]) => {
+      const [namespace, key] = fullKey.split(".");
+
+      return {
+        ownerId,
+        namespace,
+        key,
+        type: key === "vies_address" ? "multi_line_text_field" : "single_line_text_field",
+        value: String(value ?? "").trim(),
+      };
+    });
+
+  if (!metafields.length) return [];
+
+  const data = await graphQL(
+    admin,
+    `#graphql
+      mutation MetafieldsSet($metafields: [MetafieldsSetInput!]!) {
+        metafieldsSet(metafields: $metafields) {
+          metafields { id namespace key value }
+          userErrors { field message }
+        }
+      }
+    `,
+    { metafields },
+  );
+
+  const errors = data?.data?.metafieldsSet?.userErrors || [];
+  if (errors.length) throw new Error(errors.map((e: any) => e.message).join(" | "));
+
+  return data?.data?.metafieldsSet?.metafields || [];
+}
+
+async function createOrPrepareTaxExemptCustomer({
   shop,
   email,
   companyName,
-  taxExempt,
 }: {
   shop: string;
   email: string;
   companyName?: string;
-  taxExempt?: boolean;
 }) {
   if (!email) return null;
 
@@ -85,23 +116,8 @@ async function createOrUpdateInvoiceCustomer({
       `#graphql
         mutation CustomerCreate($input: CustomerInput!) {
           customerCreate(input: $input) {
-            customer {
-              id
-              email
-              taxExempt
-              tags
-              companyContactProfiles {
-                id
-                company {
-                  id
-                  name
-                }
-              }
-            }
-            userErrors {
-              field
-              message
-            }
+            customer { id email taxExempt }
+            userErrors { field message }
           }
         }
       `,
@@ -110,223 +126,79 @@ async function createOrUpdateInvoiceCustomer({
           email,
           firstName: "Invoice",
           lastName: "Customer",
-          note: `Invoice request - ${companyName || ""}`,
-          tags: ["invoice_request"],
-          taxExempt: Boolean(taxExempt),
+          note: `Invoice request reverse charge - ${companyName || ""}`,
+          tags: ["invoice_request", "reverse_charge_customer"],
         },
       },
     );
 
     const errors = createData?.data?.customerCreate?.userErrors || [];
-    if (errors.length) {
-      throw new Error(errors.map((e: any) => e.message).join(" | "));
-    }
+    if (errors.length) throw new Error(errors.map((e: any) => e.message).join(" | "));
 
     customer = createData?.data?.customerCreate?.customer;
   }
 
   if (!customer?.id) return null;
 
-  const tags = taxExempt
-    ? ["invoice_request", "reverse_charge_customer"]
-    : ["invoice_request"];
-
   const updateData = await graphQL(
     admin,
     `#graphql
       mutation CustomerUpdate($input: CustomerInput!) {
         customerUpdate(input: $input) {
-          customer {
-            id
-            email
-            taxExempt
-            tags
-            companyContactProfiles {
-              id
-              company {
-                id
-                name
-              }
-            }
-          }
-          userErrors {
-            field
-            message
-          }
+          customer { id email taxExempt }
+          userErrors { field message }
         }
       }
     `,
     {
       input: {
         id: customer.id,
-        taxExempt: Boolean(taxExempt),
-        tags,
+        taxExempt: true,
+        tags: ["invoice_request", "reverse_charge_customer"],
       },
     },
   );
 
   const errors = updateData?.data?.customerUpdate?.userErrors || [];
-  if (errors.length) {
-    throw new Error(errors.map((e: any) => e.message).join(" | "));
-  }
+  if (errors.length) throw new Error(errors.map((e: any) => e.message).join(" | "));
 
   return updateData?.data?.customerUpdate?.customer || customer;
 }
 
-async function setCustomerMetafields(
-  admin: any,
-  customerId: string,
-  metafieldsToWrite: Record<string, string>,
-) {
-  const metafields = Object.entries(metafieldsToWrite)
-    .filter(([, value]) => String(value ?? "").trim() !== "")
-    .map(([fullKey, value]) => {
-      const [namespace, key] = fullKey.split(".");
 
-      return {
-        ownerId: customerId,
-        namespace,
-        key,
-        type:
-          key === "vies_address"
-            ? "multi_line_text_field"
-            : "single_line_text_field",
-        value: String(value ?? "").trim(),
-      };
-    });
+function cleanViesText(value: string | null | undefined) {
+  const text = String(value || "").trim();
+  if (!text) return "";
 
-  if (!metafields.length) return [];
-
-  const data = await graphQL(
-    admin,
-    `#graphql
-      mutation MetafieldsSet($metafields: [MetafieldsSetInput!]!) {
-        metafieldsSet(metafields: $metafields) {
-          metafields {
-            id
-            namespace
-            key
-            value
-          }
-          userErrors {
-            field
-            message
-          }
-        }
-      }
-    `,
-    { metafields },
-  );
-
-  const errors = data?.data?.metafieldsSet?.userErrors || [];
-  if (errors.length) {
-    throw new Error(errors.map((e: any) => e.message).join(" | "));
+  const normalized = text.replace(/[-–—_\s]+/g, "").toLowerCase();
+  if (["na", "n/a", "null", "none", "unknown", "unavailable"].includes(normalized)) {
+    return "";
   }
 
-  return data?.data?.metafieldsSet?.metafields || [];
+  return text;
 }
 
-async function setCompanyMetafields(
-  admin: any,
-  companyId: string,
-  metafieldsToWrite: Record<string, string>,
-) {
-  const metafields = Object.entries(metafieldsToWrite)
-    .filter(([, value]) => String(value ?? "").trim() !== "")
-    .map(([fullKey, value]) => {
-      const [namespace, key] = fullKey.split(".");
-
-      return {
-        ownerId: companyId,
-        namespace,
-        key,
-        type:
-          key === "vies_address"
-            ? "multi_line_text_field"
-            : "single_line_text_field",
-        value: String(value ?? "").trim(),
-      };
-    });
-
-  if (!metafields.length) return [];
-
-  const data = await graphQL(
-    admin,
-    `#graphql
-      mutation MetafieldsSet($metafields: [MetafieldsSetInput!]!) {
-        metafieldsSet(metafields: $metafields) {
-          metafields {
-            id
-            namespace
-            key
-            value
-          }
-          userErrors {
-            field
-            message
-          }
-        }
-      }
-    `,
-    { metafields },
-  );
-
-  const errors = data?.data?.metafieldsSet?.userErrors || [];
-  if (errors.length) {
-    throw new Error(errors.map((e: any) => e.message).join(" | "));
-  }
-
-  return data?.data?.metafieldsSet?.metafields || [];
-}
-
-function firstAddressLine(address: string) {
-  return String(address || "")
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean)[0] || "Address from VIES";
-}
-
-async function createCompanyAndAssignCustomer({
+async function createCompanyForInvoiceRequest({
   admin,
   customer,
   companyName,
-  countryCode,
   vatNumber,
+  countryCode,
+  viesCompanyName,
   viesAddress,
-  pec,
-  sdi,
+  fiscalMetafields,
 }: {
   admin: any;
   customer: any;
   companyName: string;
-  countryCode: string;
   vatNumber: string;
+  countryCode: string;
+  viesCompanyName?: string;
   viesAddress?: string;
-  pec?: string;
-  sdi?: string;
+  fiscalMetafields: Record<string, string>;
 }) {
-  const existingCompany = customer?.companyContactProfiles?.[0]?.company || null;
-
-  if (existingCompany?.id) {
-    await setCompanyMetafields(admin, existingCompany.id, {
-      "invoice.vat_number": normalizeVat(vatNumber || ""),
-      "invoice.billing_country": normalizeCountry(countryCode || ""),
-      "invoice.pec": pec || "",
-      "invoice.codice_destinatario": sdi || "",
-      "invoice.vies_address": viesAddress || "",
-    });
-
-    return {
-      skipped: true,
-      reason: "Customer already assigned to company.",
-      companyId: existingCompany.id,
-      companyName: existingCompany.name,
-      companyLocationId: null,
-    };
-  }
-
-  const normalizedCountry = normalizeCountry(countryCode || "IT");
-  const normalizedVat = normalizeVat(vatNumber || "");
+  const effectiveCompanyName = cleanViesText(viesCompanyName) || String(companyName || "").trim();
+  if (!effectiveCompanyName || !customer?.id) return null;
 
   const companyCreateData = await graphQL(
     admin,
@@ -336,40 +208,25 @@ async function createCompanyAndAssignCustomer({
           company {
             id
             name
-            contactRoles(first: 10) {
-              nodes {
-                id
-                name
-              }
-            }
-            locations(first: 10) {
-              nodes {
-                id
-                name
-              }
-            }
+            contactRoles(first: 10) { nodes { id name } }
+            locations(first: 10) { nodes { id name } }
           }
-          userErrors {
-            field
-            message
-          }
+          userErrors { field message }
         }
       }
     `,
     {
       input: {
-        company: {
-          name: companyName,
-        },
+        company: { name: effectiveCompanyName },
         companyLocation: {
-          name: companyName,
-          taxRegistrationId: normalizedVat,
-          taxExempt: normalizedCountry !== SHOP_COUNTRY,
+          name: effectiveCompanyName,
+          taxRegistrationId: vatNumber,
+          taxExempt: false,
           billingAddress: {
-            recipient: companyName,
-            address1: firstAddressLine(viesAddress || ""),
+            recipient: effectiveCompanyName,
+            address1: cleanViesText(viesAddress).split("\n")[0]?.trim() || "Address unavailable from VIES",
             city: "N/A",
-            countryCode: normalizedCountry,
+            countryCode: countryCode || "IT",
           },
         },
       },
@@ -377,9 +234,7 @@ async function createCompanyAndAssignCustomer({
   );
 
   const companyErrors = companyCreateData?.data?.companyCreate?.userErrors || [];
-  if (companyErrors.length) {
-    throw new Error(companyErrors.map((e: any) => e.message).join(" | "));
-  }
+  if (companyErrors.length) throw new Error(companyErrors.map((e: any) => e.message).join(" | "));
 
   const company = companyCreateData?.data?.companyCreate?.company;
   const location = company?.locations?.nodes?.[0];
@@ -387,98 +242,68 @@ async function createCompanyAndAssignCustomer({
 
   if (!company?.id || !location?.id || !role?.id) {
     return {
-      skipped: true,
-      reason: "Company created but location or role missing.",
       companyId: company?.id || null,
       companyLocationId: location?.id || null,
     };
   }
 
-  await setCompanyMetafields(admin, company.id, {
-    "invoice.vat_number": normalizedVat,
-    "invoice.billing_country": normalizedCountry,
-    "invoice.pec": pec || "",
-    "invoice.codice_destinatario": sdi || "",
-    "invoice.vies_address": viesAddress || "",
-  });
-
-  const assignCustomerData = await graphQL(
+  const assignData = await graphQL(
     admin,
     `#graphql
       mutation AssignCustomer($companyId: ID!, $customerId: ID!) {
-        companyAssignCustomerAsContact(
-          companyId: $companyId
-          customerId: $customerId
-        ) {
-          companyContact {
-            id
-          }
-          userErrors {
-            field
-            message
-          }
+        companyAssignCustomerAsContact(companyId: $companyId, customerId: $customerId) {
+          companyContact { id }
+          userErrors { field message }
         }
       }
     `,
-    {
-      companyId: company.id,
-      customerId: customer.id,
-    },
+    { companyId: company.id, customerId: customer.id },
   );
 
-  const assignErrors =
-    assignCustomerData?.data?.companyAssignCustomerAsContact?.userErrors || [];
-  if (assignErrors.length) {
-    throw new Error(assignErrors.map((e: any) => e.message).join(" | "));
-  }
+  const assignErrors = assignData?.data?.companyAssignCustomerAsContact?.userErrors || [];
+  if (assignErrors.length) throw new Error(assignErrors.map((e: any) => e.message).join(" | "));
 
-  const companyContact =
-    assignCustomerData?.data?.companyAssignCustomerAsContact?.companyContact;
+  const contact = assignData?.data?.companyAssignCustomerAsContact?.companyContact;
 
-  if (companyContact?.id) {
-    const assignRoleData = await graphQL(
+  if (contact?.id) {
+    const roleData = await graphQL(
       admin,
       `#graphql
-        mutation AssignRole(
-          $companyContactId: ID!
-          $companyLocationId: ID!
-          $companyContactRoleId: ID!
-        ) {
+        mutation AssignRole($companyContactId: ID!, $companyLocationId: ID!, $companyContactRoleId: ID!) {
           companyContactAssignRole(
             companyContactId: $companyContactId
             companyLocationId: $companyLocationId
             companyContactRoleId: $companyContactRoleId
-          ) {
-            userErrors {
-              field
-              message
-            }
-          }
+          ) { userErrors { field message } }
         }
       `,
       {
-        companyContactId: companyContact.id,
+        companyContactId: contact.id,
         companyLocationId: location.id,
         companyContactRoleId: role.id,
       },
     );
 
-    const roleErrors =
-      assignRoleData?.data?.companyContactAssignRole?.userErrors || [];
-    if (roleErrors.length) {
-      throw new Error(roleErrors.map((e: any) => e.message).join(" | "));
-    }
+    const roleErrors = roleData?.data?.companyContactAssignRole?.userErrors || [];
+    if (roleErrors.length) throw new Error(roleErrors.map((e: any) => e.message).join(" | "));
   }
 
+  await setOwnerMetafields(admin, company.id, {
+    ...fiscalMetafields,
+    "b2b.company_id": company.id,
+    "b2b.company_location_id": location.id,
+  });
+
+  await setOwnerMetafields(admin, customer.id, {
+    ...fiscalMetafields,
+    "b2b.company_id": company.id,
+    "b2b.company_location_id": location.id,
+  });
+
   return {
-    created: true,
     companyId: company.id,
-    companyName: company.name,
     companyLocationId: location.id,
-    companyLocationName: location.name,
-    companyContactId: companyContact?.id || null,
-    companyContactRoleId: role.id,
-    companyContactRoleName: role.name,
+    companyName: company.name,
   };
 }
 
@@ -507,11 +332,9 @@ export async function action({ request }: ActionFunctionArgs) {
     const invoiceType = String(payload.invoiceType || "private");
     const cartToken = String(payload.cartToken || "");
     const countryCode = normalizeCountry(payload.countryCode || "IT");
-    const vatNumber = normalizeVat(payload.vatNumber || "");
+    let vatNumber = normalizeVat(payload.vatNumber || "");
     const companyName = String(payload.companyName || "").trim();
-    const customerEmail = String(payload.customerEmail || payload.email || "")
-      .trim()
-      .toLowerCase();
+    const customerEmail = String(payload.customerEmail || payload.email || "").trim().toLowerCase();
     const pec = String(payload.pec || "").trim();
     const sdi = String(payload.sdi || "").trim();
 
@@ -563,7 +386,6 @@ export async function action({ request }: ActionFunctionArgs) {
     let reverseCharge = false;
     let taxExemptCustomerPrepared = false;
     let preparedCustomer: any = null;
-    let companyWrite: any = null;
     let status = "registered";
     let pendingManualReview = false;
 
@@ -578,6 +400,11 @@ export async function action({ request }: ActionFunctionArgs) {
       viesValid = verification.vies.valid;
       viesCompanyName = verification.vies.companyName || "";
       viesAddress = verification.vies.address || "";
+      vatNumber = verification.vies.vatNumber || vatNumber;
+
+      const acceptsMissingViesName =
+        VIES_NAME_UNAVAILABLE_COUNTRIES.includes(verification.vies.countryCode) &&
+        !String(viesCompanyName || "").trim();
 
       reverseCharge = shouldApplyReverseCharge({
         shopCountry: SHOP_COUNTRY,
@@ -585,45 +412,14 @@ export async function action({ request }: ActionFunctionArgs) {
         viesValid,
       });
 
-      if (customerEmail) {
-        const { admin } = await unauthenticated.admin(shop);
-
-        preparedCustomer = await createOrUpdateInvoiceCustomer({
+      if (reverseCharge && customerEmail) {
+        preparedCustomer = await createOrPrepareTaxExemptCustomer({
           shop,
           email: customerEmail,
           companyName: viesCompanyName || companyName,
-          taxExempt: reverseCharge,
         });
 
-        if (preparedCustomer?.id) {
-          await setCustomerMetafields(admin, preparedCustomer.id, {
-            "invoice.vat_number": verification.vies.vatNumber || vatNumber,
-            "invoice.billing_country": countryCode,
-            "invoice.company_name": companyName,
-            "invoice.vies_company_name": viesCompanyName,
-            "invoice.vies_address": viesAddress,
-            "invoice.reverse_charge": reverseCharge ? "true" : "false",
-            "invoice.pec": isItaly ? pec : "",
-            "invoice.codice_destinatario": isItaly ? sdi : "",
-          });
-
-          if (viesValid) {
-            companyWrite = await createCompanyAndAssignCustomer({
-              admin,
-              customer: preparedCustomer,
-              companyName: viesCompanyName || companyName,
-              countryCode,
-              vatNumber: verification.vies.vatNumber || vatNumber,
-              viesAddress,
-              pec: isItaly ? pec : "",
-              sdi: isItaly ? sdi : "",
-            });
-          }
-        }
-
-        taxExemptCustomerPrepared = Boolean(
-          reverseCharge && preparedCustomer?.taxExempt,
-        );
+        taxExemptCustomerPrepared = Boolean(preparedCustomer?.taxExempt);
       }
 
       if (!viesValid) {
@@ -659,17 +455,54 @@ export async function action({ request }: ActionFunctionArgs) {
         viesAddress: viesAddress || null,
         reverseCharge,
         taxExemptApplied: taxExemptCustomerPrepared,
-        shopifyCompanyId: companyWrite?.companyId || null,
-        shopifyCompanyLocationId: companyWrite?.companyLocationId || null,
         status,
       },
     });
 
-    if (preparedCustomer?.id) {
+    let invoiceCompany: any = null;
+
+    if (invoiceType === "company" && preparedCustomer?.id && (reverseCharge || countryCode === "IT" || viesValid)) {
       const { admin } = await unauthenticated.admin(shop);
-      await setCustomerMetafields(admin, preparedCustomer.id, {
-        "invoice.invoice_request_id": invoiceRequest.id,
+      const viesStatus =
+        viesValid && !String(viesCompanyName || "").trim() && VIES_NAME_UNAVAILABLE_COUNTRIES.includes(countryCode)
+          ? "valid_name_unavailable"
+          : viesValid
+            ? "valid"
+            : "invalid";
+
+      const fiscalMetafields = {
+        "b2b.vat_number": vatNumber,
+        "b2b.billing_country": countryCode,
+        "b2b.company_name_submitted": companyName,
+        "b2b.vies_company_name": viesCompanyName || "",
+        "b2b.vies_address": viesAddress || "",
+        "b2b.vies_status": viesStatus,
+        "b2b.reverse_charge": reverseCharge ? "true" : "false",
+        "b2b.pec": isItaly ? pec : "",
+        "b2b.codice_destinatario": isItaly ? sdi : "",
+        "b2b.invoice_request_id": invoiceRequest.id,
+      };
+
+      invoiceCompany = await createCompanyForInvoiceRequest({
+        admin,
+        customer: preparedCustomer,
+        companyName,
+        vatNumber,
+        countryCode,
+        viesCompanyName,
+        viesAddress,
+        fiscalMetafields,
       });
+
+      if (invoiceCompany?.companyId || invoiceCompany?.companyLocationId) {
+        await db.invoiceRequest.update({
+          where: { id: invoiceRequest.id },
+          data: {
+            shopifyCompanyId: invoiceCompany.companyId || null,
+            shopifyCompanyLocationId: invoiceCompany.companyLocationId || null,
+          },
+        });
+      }
     }
 
     return json({
@@ -677,10 +510,7 @@ export async function action({ request }: ActionFunctionArgs) {
       invoiceRequestId: invoiceRequest.id,
       invoiceType: "company",
       customerEmail,
-      customerId: preparedCustomer?.id || null,
-      shopifyCompanyId: companyWrite?.companyId || null,
-      shopifyCompanyLocationId: companyWrite?.companyLocationId || null,
-      vatNumber: viesValid ? viesCompanyName ? vatNumber : vatNumber : vatNumber,
+      vatNumber,
       countryCode,
       viesChecked,
       viesValid,
@@ -691,7 +521,7 @@ export async function action({ request }: ActionFunctionArgs) {
       taxExemptCustomerPrepared,
       mustUseSameEmailAtCheckout: Boolean(reverseCharge && customerEmail),
       pendingManualReview,
-      companyCreated: Boolean(companyWrite?.created),
+      company: invoiceCompany,
       message: pendingManualReview
         ? locale === "it"
           ? "Richiesta salvata per verifica manuale. Controlleremo il VAT prima della fatturazione."
