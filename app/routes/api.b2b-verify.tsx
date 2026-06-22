@@ -8,7 +8,7 @@ const VIES_WSDL =
 
 const AUTO_APPROVE_MATCH_THRESHOLD = 70;
 const DEFAULT_SHOP = "zig-italia-frutta-secca-e-semi.myshopify.com";
-const VIES_NAME_UNAVAILABLE_COUNTRIES = ["DE"];
+const VIES_NAME_UNAVAILABLE_COUNTRIES = ["DE", "ES"];
 
 const MANAGED_B2B_TAGS = [
   "b2b_pending_review",
@@ -363,6 +363,42 @@ async function syncB2BTags(
   }
 }
 
+async function updateCustomerTaxExempt(admin: any, customerId: string, taxExempt: boolean) {
+  if (!customerId) return null;
+
+  const data = await graphQL(
+    admin,
+    `#graphql
+      mutation CustomerUpdateTaxExempt($input: CustomerInput!) {
+        customerUpdate(input: $input) {
+          customer {
+            id
+            email
+            taxExempt
+          }
+          userErrors {
+            field
+            message
+          }
+        }
+      }
+    `,
+    {
+      input: {
+        id: customerId,
+        taxExempt,
+      },
+    },
+  );
+
+  const errors = data?.data?.customerUpdate?.userErrors ?? [];
+  if (errors.length) {
+    throw new Error(errors.map((e: any) => e.message).join(" | "));
+  }
+
+  return data?.data?.customerUpdate?.customer ?? null;
+}
+
 async function setCustomerMetafields(
   admin: any,
   customerId: string,
@@ -489,8 +525,11 @@ async function createCompanyForApprovedCustomer({
         },
         companyLocation: {
           name: companyName,
-          taxRegistrationId: normalizeVatForCountry(vies.vatNumber || payload.vatNumber, billingValidation.billingCountry),
-          taxExempt: false,
+          taxRegistrationId: normalizeVatForCountry(
+            vies.vatNumber || payload.vatNumber,
+            billingValidation.billingCountry,
+          ),
+          taxExempt: billingValidation.billingCountry !== "IT",
           billingAddress: {
             recipient: companyName,
             address1:
@@ -662,6 +701,16 @@ async function upsertCustomerAndWriteData({
 
     if (!customer?.id) {
       throw new Error("Approved customer was not found after creation/update.");
+    }
+
+    if (billingValidation.billingCountry !== "IT") {
+      const taxExemptCustomer = await updateCustomerTaxExempt(
+        admin,
+        customer.id,
+        true,
+      );
+
+      customer = taxExemptCustomer || customer;
     }
 
     company = await createCompanyForApprovedCustomer({
