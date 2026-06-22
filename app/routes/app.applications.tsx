@@ -1,6 +1,5 @@
 import { Form, useLoaderData } from "react-router";
 import { useMemo, useState } from "react";
-import type { CSSProperties } from "react";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
 
@@ -42,7 +41,13 @@ export async function action({ request }: any) {
 }
 
 function formatDate(value: string | Date) {
-  return new Date(value).toLocaleString("it-IT");
+  return new Date(value).toLocaleString("it-IT", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
 
 function statusText(status: string) {
@@ -51,7 +56,7 @@ function statusText(status: string) {
   return "In revisione";
 }
 
-function statusTone(status: string): "success" | "danger" | "warning" {
+function statusTone(status: string) {
   if (status === "approved") return "success";
   if (status === "rejected") return "danger";
   return "warning";
@@ -61,6 +66,12 @@ function viesText(app: any) {
   if (app.viesValid === true) return "VIES valido";
   if (app.viesValid === false) return "VIES non valido";
   return "VIES non controllato";
+}
+
+function viesTone(app: any) {
+  if (app.viesValid === true) return "success";
+  if (app.viesValid === false) return "danger";
+  return "neutral";
 }
 
 function shopifySyncText(app: any) {
@@ -76,7 +87,35 @@ function Badge({
   children: React.ReactNode;
   tone?: "success" | "danger" | "warning" | "info" | "neutral";
 }) {
-  return <span style={{ ...badgeBase, ...badgeTone[tone] }}>{children}</span>;
+  return <span className={`zbe-badge zbe-badge--${tone}`}>{children}</span>;
+}
+
+function Read({ label, value }: { label: string; value: React.ReactNode }) {
+  return (
+    <div className="zbe-read">
+      <strong>{label}</strong>
+      <div>{value}</div>
+    </div>
+  );
+}
+
+function Stat({
+  label,
+  value,
+  tone,
+}: {
+  label: string;
+  value: number;
+  tone?: "success" | "warning" | "danger";
+}) {
+  return (
+    <div className="zbe-stat">
+      <div className={`zbe-stat-value ${tone ? `zbe-stat-value--${tone}` : ""}`}>
+        {value}
+      </div>
+      <div className="zbe-stat-label">{label}</div>
+    </div>
+  );
 }
 
 export default function ApplicationsPage() {
@@ -108,37 +147,37 @@ export default function ApplicationsPage() {
   }, [applications, query, statusFilter]);
 
   return (
-    <div style={page}>
-      <section style={hero}>
+    <div className="zbe-page">
+      <style>{styles}</style>
+
+      <section className="zbe-hero">
         <div>
-          <div style={eyebrow}>Zig Business Engine</div>
-          <h1 style={title}>Richieste B2B</h1>
-          <p style={subtitle}>
-            Controlla richieste di accesso, risultato VIES, dati fiscali e sincronizzazione Shopify.
+          <div className="zbe-eyebrow">Zig Business Engine</div>
+          <h1>Richieste B2B</h1>
+          <p>
+            Controlla accessi, VIES, dati fiscali e sincronizzazione Shopify.
           </p>
         </div>
-        <div style={heroIcon}>👥</div>
+        <div className="zbe-hero-icon">👥</div>
       </section>
 
-      <section style={statsGrid}>
+      <section className="zbe-stats">
         <Stat label="Totali" value={stats.total} />
         <Stat label="In revisione" value={stats.pending} tone="warning" />
         <Stat label="Approvate" value={stats.approved} tone="success" />
         <Stat label="Rifiutate" value={stats.rejected} tone="danger" />
       </section>
 
-      <section style={toolbar}>
+      <section className="zbe-toolbar">
         <input
           value={query}
           onChange={(event) => setQuery(event.target.value)}
           placeholder="Cerca azienda, VAT, email..."
-          style={searchInput}
         />
 
         <select
           value={statusFilter}
           onChange={(event) => setStatusFilter(event.target.value)}
-          style={selectInput}
         >
           <option value="all">Tutti gli stati</option>
           <option value="pending_review">In revisione</option>
@@ -147,43 +186,60 @@ export default function ApplicationsPage() {
         </select>
       </section>
 
-      <section style={list}>
+      <section className="zbe-list">
         {filtered.map((app) => {
           const isOpen = openId === app.id;
 
           return (
-            <article key={app.id} style={requestCard}>
-              <div style={summaryGrid}>
-                <div style={badges}>
-                  <Badge tone={statusTone(app.status)}>{statusText(app.status)}</Badge>
-                  <Badge tone={app.viesValid ? "success" : app.viesValid === false ? "danger" : "neutral"}>
-                    {viesText(app)}
-                  </Badge>
+            <article key={app.id} className="zbe-request">
+              <div className="zbe-summary">
+                <div className="zbe-summary-main">
+                  <div className="zbe-badges">
+                    <Badge tone={statusTone(app.status) as any}>{statusText(app.status)}</Badge>
+                    <Badge tone={viesTone(app) as any}>{viesText(app)}</Badge>
+                  </div>
+
+                  <strong className="zbe-company">
+                    {app.companyNameSubmitted || "Azienda senza nome"}
+                  </strong>
+
+                  <div className="zbe-mobile-meta">
+                    {app.vatNumberSubmitted || "VAT mancante"} ·{" "}
+                    {app.billingCountry || "Paese non indicato"}
+                  </div>
                 </div>
 
-                <div>
-                  <strong style={primaryText}>{app.companyNameSubmitted || "Azienda senza nome"}</strong>
-                  <div style={muted}>{app.vatNumberSubmitted || "VAT mancante"}</div>
+                <div className="zbe-summary-cell">
+                  <span>Azienda / VAT</span>
+                  <strong>{app.companyNameSubmitted || "-"}</strong>
+                  <small>{app.vatNumberSubmitted || "VAT mancante"}</small>
                 </div>
 
-                <div>
+                <div className="zbe-summary-cell">
+                  <span>Contatto</span>
                   <strong>{app.email || "-"}</strong>
-                  <div style={muted}>{app.billingCountry || "Paese non indicato"}</div>
+                  <small>{app.billingCountry || "Paese non indicato"}</small>
                 </div>
 
-                <div>
-                  <strong>{app.matchScore === null || app.matchScore === undefined ? "Match —" : `Match ${app.matchScore}%`}</strong>
-                  <div style={muted}>{shopifySyncText(app)}</div>
+                <div className="zbe-summary-cell">
+                  <span>Controllo</span>
+                  <strong>
+                    {app.matchScore === null || app.matchScore === undefined
+                      ? "Match —"
+                      : `Match ${app.matchScore}%`}
+                  </strong>
+                  <small>{shopifySyncText(app)}</small>
                 </div>
 
-                <div>
+                <div className="zbe-summary-cell">
+                  <span>Data</span>
                   <strong>{formatDate(app.createdAt)}</strong>
-                  <div style={muted}>Aggiornata {formatDate(app.updatedAt)}</div>
+                  <small>Agg. {formatDate(app.updatedAt)}</small>
                 </div>
 
                 <button
                   type="button"
-                  style={buttonDark}
+                  className="zbe-button zbe-button--dark"
                   onClick={() => setOpenId(isOpen ? null : app.id)}
                 >
                   {isOpen ? "Chiudi" : "Apri"}
@@ -191,39 +247,55 @@ export default function ApplicationsPage() {
               </div>
 
               {isOpen && (
-                <div style={detailBox}>
-                  <div style={detailGrid}>
-                    <section style={card}>
-                      <h2 style={sectionTitle}>Richiesta</h2>
+                <div className="zbe-detail">
+                  <div className="zbe-detail-grid">
+                    <section className="zbe-card">
+                      <h2>Richiesta</h2>
                       <Read label="Azienda inserita" value={app.companyNameSubmitted || "-"} />
                       <Read label="Email" value={app.email || "-"} />
                       <Read label="Nome" value={app.firstName || "-"} />
                       <Read label="Cognome" value={app.lastName || "-"} />
                     </section>
 
-                    <section style={card}>
-                      <h2 style={sectionTitle}>Dati fiscali</h2>
+                    <section className="zbe-card">
+                      <h2>Dati fiscali</h2>
                       <Read label="Partita IVA / VAT" value={app.vatNumberSubmitted || "-"} />
                       <Read label="Paese" value={app.billingCountry || "-"} />
                       <Read label="PEC" value={app.pec || "-"} />
                       <Read label="Codice destinatario / SDI" value={app.codiceDestinatario || "-"} />
                     </section>
 
-                    <section style={card}>
-                      <h2 style={sectionTitle}>VIES</h2>
-                      <Read label="Validità" value={app.viesValid ? "Valido" : app.viesValid === false ? "Non valido" : "-"} />
+                    <section className="zbe-card">
+                      <h2>VIES</h2>
+                      <Read
+                        label="Validità"
+                        value={
+                          app.viesValid
+                            ? "Valido"
+                            : app.viesValid === false
+                              ? "Non valido"
+                              : "-"
+                        }
+                      />
                       <Read label="Azienda VIES" value={app.viesCompanyName || "-"} />
                       <Read label="Paese VIES" value={app.viesCountryCode || "-"} />
                       <Read label="VAT VIES" value={app.viesVatNumber || "-"} />
-                      <Read label="Match" value={app.matchScore === null || app.matchScore === undefined ? "-" : `${app.matchScore}%`} />
-                      <div style={{ marginTop: 12 }}>
+                      <Read
+                        label="Match"
+                        value={
+                          app.matchScore === null || app.matchScore === undefined
+                            ? "-"
+                            : `${app.matchScore}%`
+                        }
+                      />
+                      <div className="zbe-read">
                         <strong>Indirizzo VIES</strong>
-                        <pre style={pre}>{app.viesAddress || "-"}</pre>
+                        <pre>{app.viesAddress || "-"}</pre>
                       </div>
                     </section>
 
-                    <section style={card}>
-                      <h2 style={sectionTitle}>Shopify</h2>
+                    <section className="zbe-card">
+                      <h2>Shopify</h2>
                       <Read label="Customer ID" value={app.shopifyCustomerId || "Non creato"} />
                       <Read label="Company ID" value={app.shopifyCompanyId || "Non creata"} />
                       <Read label="Location ID" value={app.shopifyCompanyLocationId || "Non creata"} />
@@ -231,19 +303,33 @@ export default function ApplicationsPage() {
                     </section>
                   </div>
 
-                  <div style={dangerZone}>
+                  <div className="zbe-danger">
                     <div>
                       <strong>Elimina richiesta</strong>
-                      <div style={muted}>Usalo solo per pulire test o richieste duplicate. L’azione è definitiva.</div>
+                      <small>
+                        Solo per test o duplicati. L’azione è definitiva.
+                      </small>
                     </div>
 
-                    <Form method="post" onSubmit={(event) => {
-                      if (!window.confirm("Eliminare definitivamente questa richiesta B2B?")) {
-                        event.preventDefault();
-                      }
-                    }}>
+                    <Form
+                      method="post"
+                      onSubmit={(event) => {
+                        if (
+                          !window.confirm(
+                            "Eliminare definitivamente questa richiesta B2B?",
+                          )
+                        ) {
+                          event.preventDefault();
+                        }
+                      }}
+                    >
                       <input type="hidden" name="id" value={app.id} />
-                      <button type="submit" name="intent" value="delete" style={buttonRed}>
+                      <button
+                        type="submit"
+                        name="intent"
+                        value="delete"
+                        className="zbe-button zbe-button--red"
+                      >
                         Elimina
                       </button>
                     </Form>
@@ -255,256 +341,395 @@ export default function ApplicationsPage() {
         })}
 
         {!filtered.length && (
-          <div style={emptyState}>Nessuna richiesta B2B trovata.</div>
+          <div className="zbe-empty">Nessuna richiesta B2B trovata.</div>
         )}
       </section>
     </div>
   );
 }
 
-function Stat({
-  label,
-  value,
-  tone,
-}: {
-  label: string;
-  value: number;
-  tone?: "success" | "warning" | "danger";
-}) {
-  const color =
-    tone === "success" ? "#1f7a35" : tone === "warning" ? "#b7791f" : tone === "danger" ? "#9f2f1f" : "#394122";
+const styles = `
+  .zbe-page {
+    padding: 24px;
+    background: #f5f1df;
+    min-height: 100vh;
+    color: #253018;
+  }
 
-  return (
-    <div style={statCard}>
-      <div style={{ ...statValue, color }}>{value}</div>
-      <div style={statLabel}>{label}</div>
-    </div>
-  );
-}
+  .zbe-hero {
+    display: flex;
+    justify-content: space-between;
+    gap: 24px;
+    align-items: center;
+    background: linear-gradient(135deg, #aec58b 0%, #f5f1df 68%, #ffd44d 100%);
+    border-radius: 34px;
+    padding: 34px;
+    box-shadow: 0 18px 45px rgba(57,65,34,.12);
+  }
 
-function Read({ label, value }: { label: string; value: React.ReactNode }) {
-  return (
-    <div style={{ marginBottom: 12 }}>
-      <strong style={{ display: "block", marginBottom: 4 }}>{label}</strong>
-      <div style={{ overflowWrap: "anywhere" }}>{value}</div>
-    </div>
-  );
-}
+  .zbe-eyebrow {
+    text-transform: uppercase;
+    letter-spacing: .08em;
+    font-size: 13px;
+    font-weight: 900;
+    color: #6f873d;
+    margin-bottom: 10px;
+  }
 
-const page: CSSProperties = {
-  padding: 24,
-  background: "#f5f1df",
-  minHeight: "100vh",
-  color: "#253018",
-};
+  .zbe-hero h1 {
+    margin: 0;
+    font-size: clamp(42px, 6vw, 72px);
+    line-height: .92;
+    font-weight: 950;
+  }
 
-const hero: CSSProperties = {
-  display: "flex",
-  justifyContent: "space-between",
-  gap: 24,
-  alignItems: "center",
-  background: "linear-gradient(135deg, #aec58b 0%, #f5f1df 68%, #ffd44d 100%)",
-  borderRadius: 34,
-  padding: 34,
-  boxShadow: "0 18px 45px rgba(57,65,34,.12)",
-};
+  .zbe-hero p {
+    max-width: 760px;
+    font-size: 18px;
+    line-height: 1.45;
+    margin: 18px 0 0;
+  }
 
-const eyebrow: CSSProperties = {
-  textTransform: "uppercase",
-  letterSpacing: ".08em",
-  fontSize: 13,
-  fontWeight: 900,
-  color: "#6f873d",
-  marginBottom: 10,
-};
+  .zbe-hero-icon {
+    font-size: 72px;
+    background: rgba(248,243,223,.78);
+    width: 150px;
+    height: 150px;
+    border-radius: 34px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 auto;
+  }
 
-const title: CSSProperties = {
-  margin: 0,
-  fontSize: "clamp(42px, 6vw, 72px)",
-  lineHeight: ".92",
-  fontWeight: 950,
-};
+  .zbe-stats {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 12px;
+    margin-top: 20px;
+  }
 
-const subtitle: CSSProperties = {
-  maxWidth: 760,
-  fontSize: 18,
-  lineHeight: 1.45,
-  marginTop: 18,
-};
+  .zbe-stat {
+    background: white;
+    border-radius: 22px;
+    padding: 18px;
+    box-shadow: 0 12px 30px rgba(57,65,34,.08);
+  }
 
-const heroIcon: CSSProperties = {
-  fontSize: 72,
-  background: "rgba(248,243,223,.78)",
-  width: 150,
-  height: 150,
-  borderRadius: 34,
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "center",
-};
+  .zbe-stat-value {
+    font-size: 34px;
+    font-weight: 950;
+    line-height: 1;
+    color: #394122;
+  }
 
-const statsGrid: CSSProperties = {
-  display: "grid",
-  gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
-  gap: 12,
-  marginTop: 20,
-};
+  .zbe-stat-value--success { color: #1f7a35; }
+  .zbe-stat-value--warning { color: #b7791f; }
+  .zbe-stat-value--danger { color: #9f2f1f; }
 
-const statCard: CSSProperties = {
-  background: "white",
-  borderRadius: 22,
-  padding: 18,
-  boxShadow: "0 12px 30px rgba(57,65,34,.08)",
-};
+  .zbe-stat-label {
+    margin-top: 8px;
+    font-weight: 800;
+    color: rgba(37,48,24,.70);
+  }
 
-const statValue: CSSProperties = {
-  fontSize: 34,
-  fontWeight: 950,
-  lineHeight: 1,
-};
+  .zbe-toolbar {
+    display: grid;
+    grid-template-columns: 1fr 220px;
+    gap: 12px;
+    margin-top: 20px;
+  }
 
-const statLabel: CSSProperties = {
-  marginTop: 8,
-  fontWeight: 800,
-  color: "rgba(37,48,24,.70)",
-};
+  .zbe-toolbar input,
+  .zbe-toolbar select {
+    min-height: 48px;
+    border: 1px solid rgba(57,65,34,.18);
+    border-radius: 999px;
+    padding: 0 18px;
+    font-size: 15px;
+    background: white;
+  }
 
-const toolbar: CSSProperties = {
-  display: "grid",
-  gridTemplateColumns: "1fr 220px",
-  gap: 12,
-  marginTop: 20,
-};
+  .zbe-list {
+    display: grid;
+    gap: 12px;
+    margin-top: 18px;
+  }
 
-const searchInput: CSSProperties = {
-  minHeight: 48,
-  border: "1px solid rgba(57,65,34,.18)",
-  borderRadius: 999,
-  padding: "0 18px",
-  fontSize: 15,
-};
+  .zbe-request {
+    background: white;
+    border-radius: 24px;
+    box-shadow: 0 12px 30px rgba(57,65,34,.08);
+    overflow: hidden;
+  }
 
-const selectInput: CSSProperties = {
-  ...searchInput,
-};
+  .zbe-summary {
+    display: grid;
+    grid-template-columns: minmax(230px, 1.2fr) minmax(190px, 1fr) minmax(190px, 1fr) minmax(160px, .8fr) minmax(150px, .75fr) auto;
+    gap: 14px;
+    align-items: center;
+    padding: 18px;
+  }
 
-const list: CSSProperties = {
-  display: "grid",
-  gap: 12,
-  marginTop: 18,
-};
+  .zbe-summary-main {
+    min-width: 0;
+  }
 
-const requestCard: CSSProperties = {
-  background: "white",
-  borderRadius: 24,
-  boxShadow: "0 12px 30px rgba(57,65,34,.08)",
-  overflow: "hidden",
-};
+  .zbe-company {
+    display: none;
+    font-size: 17px;
+    line-height: 1.2;
+    margin-top: 10px;
+    overflow-wrap: anywhere;
+  }
 
-const summaryGrid: CSSProperties = {
-  display: "grid",
-  gridTemplateColumns: "250px 1.2fr 1.1fr 1fr 1fr auto",
-  gap: 14,
-  alignItems: "center",
-  padding: 18,
-};
+  .zbe-mobile-meta {
+    display: none;
+    color: rgba(37,48,24,.62);
+    font-size: 13px;
+    margin-top: 6px;
+  }
 
-const badges: CSSProperties = {
-  display: "flex",
-  gap: 6,
-  flexWrap: "wrap",
-};
+  .zbe-summary-cell {
+    min-width: 0;
+  }
 
-const badgeBase: CSSProperties = {
-  display: "inline-flex",
-  borderRadius: 999,
-  padding: "7px 11px",
-  fontWeight: 900,
-  fontSize: 13,
-  whiteSpace: "nowrap",
-};
+  .zbe-summary-cell span {
+    display: block;
+    color: rgba(37,48,24,.55);
+    font-size: 12px;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+    margin-bottom: 4px;
+  }
 
-const badgeTone: Record<string, CSSProperties> = {
-  success: { background: "#dff3df", color: "#1f5f2f" },
-  danger: { background: "#ffe1dc", color: "#8a2b1b" },
-  warning: { background: "#fff3cd", color: "#7a4b00" },
-  info: { background: "#e5f0ff", color: "#234f9d" },
-  neutral: { background: "rgba(57,65,34,.08)", color: "#394122" },
-};
+  .zbe-summary-cell strong,
+  .zbe-summary-cell small {
+    display: block;
+    overflow-wrap: anywhere;
+  }
 
-const primaryText: CSSProperties = {
-  fontSize: 16,
-};
+  .zbe-summary-cell small {
+    color: rgba(37,48,24,.62);
+    font-size: 13px;
+    margin-top: 4px;
+  }
 
-const muted: CSSProperties = {
-  color: "rgba(37,48,24,.62)",
-  fontSize: 13,
-  marginTop: 4,
-};
+  .zbe-badges {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
 
-const buttonDark: CSSProperties = {
-  minHeight: 42,
-  border: 0,
-  borderRadius: 999,
-  background: "#303a21",
-  color: "white",
-  padding: "0 18px",
-  fontWeight: 900,
-  cursor: "pointer",
-};
+  .zbe-badge {
+    display: inline-flex;
+    border-radius: 999px;
+    padding: 7px 11px;
+    font-weight: 900;
+    font-size: 13px;
+    white-space: nowrap;
+  }
 
-const buttonRed: CSSProperties = {
-  ...buttonDark,
-  background: "#9f2f1f",
-};
+  .zbe-badge--success { background: #dff3df; color: #1f5f2f; }
+  .zbe-badge--danger { background: #ffe1dc; color: #8a2b1b; }
+  .zbe-badge--warning { background: #fff3cd; color: #7a4b00; }
+  .zbe-badge--info { background: #e5f0ff; color: #234f9d; }
+  .zbe-badge--neutral { background: rgba(57,65,34,.08); color: #394122; }
 
-const dangerZone: CSSProperties = {
-  display: "flex",
-  justifyContent: "space-between",
-  alignItems: "center",
-  gap: 16,
-  marginTop: 16,
-  background: "#fff",
-  border: "1px solid #f0b8ad",
-  borderRadius: 18,
-  padding: 16,
-};
+  .zbe-button {
+    min-height: 42px;
+    border: 0;
+    border-radius: 999px;
+    padding: 0 18px;
+    font-weight: 900;
+    cursor: pointer;
+    white-space: nowrap;
+  }
 
-const detailBox: CSSProperties = {
-  padding: 18,
-  background: "#f7f2df",
-  borderTop: "1px solid #efe4bd",
-};
+  .zbe-button--dark {
+    background: #303a21;
+    color: white;
+  }
 
-const detailGrid: CSSProperties = {
-  display: "grid",
-  gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
-  gap: 14,
-};
+  .zbe-button--red {
+    background: #9f2f1f;
+    color: white;
+  }
 
-const card: CSSProperties = {
-  background: "white",
-  border: "1px solid #efe4bd",
-  borderRadius: 18,
-  padding: 16,
-};
+  .zbe-detail {
+    padding: 18px;
+    background: #f7f2df;
+    border-top: 1px solid #efe4bd;
+  }
 
-const sectionTitle: CSSProperties = {
-  marginTop: 0,
-  marginBottom: 16,
-};
+  .zbe-detail-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 14px;
+  }
 
-const pre: CSSProperties = {
-  whiteSpace: "pre-wrap",
-  background: "#f7f7f7",
-  padding: 12,
-  borderRadius: 12,
-};
+  .zbe-card {
+    background: white;
+    border: 1px solid #efe4bd;
+    border-radius: 18px;
+    padding: 16px;
+    min-width: 0;
+  }
 
-const emptyState: CSSProperties = {
-  background: "white",
-  borderRadius: 24,
-  padding: 28,
-  textAlign: "center",
-  color: "rgba(37,48,24,.7)",
-};
+  .zbe-card h2 {
+    margin: 0 0 16px;
+    font-size: 18px;
+  }
+
+  .zbe-read {
+    margin-bottom: 12px;
+  }
+
+  .zbe-read strong {
+    display: block;
+    margin-bottom: 4px;
+  }
+
+  .zbe-read div,
+  .zbe-read pre {
+    overflow-wrap: anywhere;
+  }
+
+  .zbe-read pre {
+    white-space: pre-wrap;
+    background: #f7f7f7;
+    padding: 12px;
+    border-radius: 12px;
+    margin: 0;
+  }
+
+  .zbe-danger {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 16px;
+    margin-top: 16px;
+    background: #fff;
+    border: 1px solid #f0b8ad;
+    border-radius: 18px;
+    padding: 16px;
+  }
+
+  .zbe-danger small {
+    display: block;
+    color: rgba(37,48,24,.62);
+    margin-top: 4px;
+  }
+
+  .zbe-empty {
+    background: white;
+    border-radius: 24px;
+    padding: 28px;
+    text-align: center;
+    color: rgba(37,48,24,.7);
+  }
+
+  @media (max-width: 1180px) {
+    .zbe-summary {
+      grid-template-columns: minmax(230px, 1.3fr) minmax(190px, 1fr) minmax(190px, 1fr) auto;
+    }
+
+    .zbe-summary-cell:nth-of-type(4),
+    .zbe-summary-cell:nth-of-type(5) {
+      display: none;
+    }
+
+    .zbe-detail-grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+  }
+
+  @media (max-width: 760px) {
+    .zbe-page {
+      padding: 12px;
+    }
+
+    .zbe-hero {
+      border-radius: 24px;
+      padding: 22px;
+    }
+
+    .zbe-hero-icon {
+      display: none;
+    }
+
+    .zbe-hero h1 {
+      font-size: 42px;
+    }
+
+    .zbe-hero p {
+      font-size: 15px;
+    }
+
+    .zbe-stats {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+
+    .zbe-stat {
+      border-radius: 18px;
+      padding: 14px;
+    }
+
+    .zbe-stat-value {
+      font-size: 28px;
+    }
+
+    .zbe-toolbar {
+      grid-template-columns: 1fr;
+    }
+
+    .zbe-request {
+      border-radius: 20px;
+    }
+
+    .zbe-summary {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 12px;
+      padding: 16px;
+    }
+
+    .zbe-company,
+    .zbe-mobile-meta {
+      display: block;
+    }
+
+    .zbe-summary-cell {
+      display: none;
+    }
+
+    .zbe-summary .zbe-button {
+      width: 100%;
+    }
+
+    .zbe-detail {
+      padding: 14px;
+    }
+
+    .zbe-detail-grid {
+      grid-template-columns: 1fr;
+      gap: 12px;
+    }
+
+    .zbe-card {
+      border-radius: 16px;
+      padding: 14px;
+    }
+
+    .zbe-danger {
+      display: grid;
+      grid-template-columns: 1fr;
+    }
+
+    .zbe-danger .zbe-button {
+      width: 100%;
+    }
+  }
+`;
