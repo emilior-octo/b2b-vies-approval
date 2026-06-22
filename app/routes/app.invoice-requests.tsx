@@ -1,8 +1,9 @@
 import { Form, useLoaderData } from "react-router";
 import { useMemo, useState } from "react";
-import type { CSSProperties } from "react";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
+
+type InvoiceStatus = "registered" | "completed" | "rejected" | "pending_review";
 
 export async function loader({ request }: any) {
   await authenticate.admin(request);
@@ -14,27 +15,29 @@ export async function loader({ request }: any) {
   const invoiceRequests = await db.invoiceRequest.findMany({
     where: baseWhere,
     orderBy: { createdAt: "desc" },
-    take: 200,
+    take: 250,
   });
 
-  const [total, registrate, pending, completed, rejected, reverseCharge] =
-    await Promise.all([
-      db.invoiceRequest.count({ where: baseWhere }),
-      db.invoiceRequest.count({ where: { ...baseWhere, status: "registered" } }),
-      db.invoiceRequest.count({ where: { ...baseWhere, status: "pending_review" } }),
-      db.invoiceRequest.count({ where: { ...baseWhere, status: "completed" } }),
-      db.invoiceRequest.count({ where: { ...baseWhere, status: "rejected" } }),
-      db.invoiceRequest.count({ where: { ...baseWhere, reverseCharge: true } }),
-    ]);
+  const [total, inviate, completate, rifiutate, reverseCharge] = await Promise.all([
+    db.invoiceRequest.count({ where: baseWhere }),
+    db.invoiceRequest.count({
+      where: {
+        ...baseWhere,
+        OR: [{ status: "registered" }, { status: "pending_review" }],
+      },
+    }),
+    db.invoiceRequest.count({ where: { ...baseWhere, status: "completed" } }),
+    db.invoiceRequest.count({ where: { ...baseWhere, status: "rejected" } }),
+    db.invoiceRequest.count({ where: { ...baseWhere, reverseCharge: true } }),
+  ]);
 
   return {
     invoiceRequests,
     stats: {
       total,
-      registrate,
-      pending,
-      completed,
-      rejected,
+      inviate,
+      completate,
+      rifiutate,
       reverseCharge,
     },
   };
@@ -81,7 +84,7 @@ export async function action({ request }: any) {
     return null;
   }
 
-  if (["registered", "pending_review", "completed", "rejected"].includes(intent)) {
+  if (["registered", "completed", "rejected"].includes(intent)) {
     await db.invoiceRequest.update({
       where: { id },
       data: {
@@ -100,83 +103,120 @@ function emptyToNull(value: FormDataEntryValue | null) {
   return text ? text : null;
 }
 
-function statusLabel(status: string) {
-  if (status === "completed") return "Completata";
-  if (status === "rejected") return "Rifiutata";
-  if (status === "pending_review") return "Da controllare";
-  return "Registrata";
-}
-
-function statusColor(status: string) {
-  if (status === "completed") return "#dff3df";
-  if (status === "rejected") return "#ffe1dc";
-  if (status === "pending_review") return "#fff3cd";
-  return "#e5f0ff";
-}
-
-function invoiceTypeLabel(type: string, country?: string | null) {
-  const normalizedCountry = String(country || "").toUpperCase();
-  if (type === "company" && normalizedCountry && normalizedCountry !== "IT") {
-    return "Azienda estera";
-  }
-  if (type === "company") return "Azienda Italia";
-  return "Privato";
-}
-
-function formatDate(value: Date | string | null | undefined) {
-  if (!value) return "-";
+function formatDate(value: string | Date) {
   return new Date(value).toLocaleString("it-IT");
 }
 
-function isMissing(value: unknown) {
-  return String(value || "").trim() === "";
+function normalizeStatus(status: string): "registered" | "completed" | "rejected" {
+  if (status === "completed") return "completed";
+  if (status === "rejected") return "rejected";
+  return "registered";
 }
 
-function getWarnings(item: any) {
-  const warnings: string[] = [];
-  const type = String(item.invoiceType || "private");
+function statusLabel(status: string) {
+  const normalized = normalizeStatus(status);
+  if (normalized === "completed") return "Completata";
+  if (normalized === "rejected") return "Rifiutata";
+  return "Inviata";
+}
+
+function statusTone(status: string): "success" | "danger" | "warning" {
+  const normalized = normalizeStatus(status);
+  if (normalized === "completed") return "success";
+  if (normalized === "rejected") return "danger";
+  return "warning";
+}
+
+function requestType(item: any) {
+  if (item.invoiceType !== "company") {
+    return {
+      label: "Privato",
+      icon: "👤",
+      tone: "neutral" as const,
+      description: "Fattura privata",
+    };
+  }
+
   const country = String(item.billingCountry || "").toUpperCase();
-  const isCompany = type === "company";
-  const isForeignCompany = isCompany && country && country !== "IT";
-  const isItalianCompany = isCompany && (!country || country === "IT");
 
-
-  if (!item.email) {
-    warnings.push("Email mancante");
+  if (country === "IT") {
+    return {
+      label: "Azienda IT",
+      icon: "🏢",
+      tone: "info" as const,
+      description: "Azienda italiana",
+    };
   }
 
-  if (type === "private") {
-    if (isMissing(item.fiscalCode)) warnings.push("Codice Fiscale mancante");
-    if (isMissing(item.pec)) warnings.push("PEC mancante");
+  if (item.reverseCharge) {
+    return {
+      label: "Azienda UE",
+      icon: "🌍",
+      tone: "success" as const,
+      description: "Reverse charge",
+    };
   }
 
-  if (isCompany && isMissing(item.companyName)) {
-    warnings.push("Ragione sociale mancante");
-  }
-
-  if (isCompany && isMissing(item.vatNumber)) {
-    warnings.push("Partita IVA/VAT mancante");
-  }
-
-  if (isCompany && isMissing(item.billingCountry)) {
-    warnings.push("Paese mancante");
-  }
-
-  if (isItalianCompany && isMissing(item.pec) && isMissing(item.codiceDestinatario)) {
-    warnings.push("Per azienda italiana manca PEC o Codice Destinatario");
-  }
-
-  if (isForeignCompany) {
-    if (!item.viesChecked) warnings.push("VIES non controllato");
-    if (item.viesChecked && item.viesValid !== true) warnings.push("VAT estero non validato");
-    if (!item.reverseCharge) warnings.push("Reverse charge non applicato");
-  }
-
-  return warnings;
+  return {
+    label: "Azienda estera",
+    icon: "🌍",
+    tone: "warning" as const,
+    description: "Da verificare",
+  };
 }
 
-function hasWarnings(item: any) {
-  return getWarnings(item).length > 0;
+function missingFields(item: any) {
+  const missing: string[] = [];
+
+  if (item.invoiceType === "private") {
+    if (!item.fiscalCode) missing.push("Codice Fiscale");
+    if (!item.pec) missing.push("PEC");
+    return missing;
+  }
+
+  if (!item.companyName) missing.push("Ragione sociale");
+  if (!item.vatNumber) missing.push("Partita IVA / VAT");
+  if (!item.billingCountry) missing.push("Paese");
+
+  const country = String(item.billingCountry || "").toUpperCase();
+
+  if (country === "IT") {
+    if (!item.pec) missing.push("PEC");
+    if (!item.codiceDestinatario) missing.push("SDI");
+  }
+
+  if (country && country !== "IT" && item.viesValid !== true) {
+    missing.push("VIES non valido/da controllare");
+  }
+
+  return missing;
+}
+
+function mainTitle(item: any) {
+  if (item.invoiceType === "company") {
+    return item.companyName || item.viesCompanyName || item.email || "Richiesta azienda";
+  }
+
+  const fullName = [item.firstName, item.lastName].filter(Boolean).join(" ");
+  return fullName || item.email || "Richiesta privato";
+}
+
+function subtitle(item: any) {
+  if (item.invoiceType === "company") {
+    return item.vatNumber || item.email || "Nessuna VAT";
+  }
+
+  return item.fiscalCode ? `CF: ${item.fiscalCode}` : "CF: mancante";
+}
+
+function Badge({
+  children,
+  tone = "neutral",
+}: {
+  children: React.ReactNode;
+  tone?: "success" | "danger" | "warning" | "info" | "neutral";
+}) {
+  return <span className={`zi-badge zi-badge-${tone}`}>{children}</span>;
 }
 
 export default function InvoiceRequestsPage() {
@@ -190,22 +230,21 @@ export default function InvoiceRequestsPage() {
     const q = query.trim().toLowerCase();
 
     return invoiceRequests.filter((item) => {
-      const matchesStatus = statusFilter === "all" || item.status === statusFilter;
+      const normalizedStatus = normalizeStatus(item.status);
+      const matchesStatus =
+        statusFilter === "all" || normalizedStatus === statusFilter;
 
-      const itemType = String(item.invoiceType || "private");
-      const country = String(item.billingCountry || "").toUpperCase();
-      const isForeign = itemType === "company" && country && country !== "IT";
-      const isItalianCompany = itemType === "company" && (!country || country === "IT");
-
+      const type = requestType(item).label;
       const matchesType =
         typeFilter === "all" ||
-        (typeFilter === "private" && itemType === "private") ||
-        (typeFilter === "company_it" && isItalianCompany) ||
-        (typeFilter === "company_foreign" && isForeign) ||
-        (typeFilter === "incomplete" && hasWarnings(item));
+        (typeFilter === "private" && item.invoiceType === "private") ||
+        (typeFilter === "company_it" && type === "Azienda IT") ||
+        (typeFilter === "company_foreign" && item.invoiceType === "company" && type !== "Azienda IT");
 
       const haystack = [
         item.email,
+        item.firstName,
+        item.lastName,
         item.companyName,
         item.fiscalCode,
         item.vatNumber,
@@ -226,246 +265,246 @@ export default function InvoiceRequestsPage() {
   }, [invoiceRequests, query, statusFilter, typeFilter]);
 
   return (
-    <div style={page}>
-      <section style={hero}>
+    <div className="zi-page">
+      <Style />
+
+      <section className="zi-hero">
         <div>
-          <div style={eyebrow}>Zig Business Engine</div>
-          <h1 style={title}>Richieste fattura</h1>
-          <p style={subtitle}>
-            Controlla le richieste, correggi i dati fiscali e aggiorna lo stato. Tutto è pensato per uso amministrativo semplice.
+          <div className="zi-eyebrow">Zig Business Engine</div>
+          <h1>Richieste fattura</h1>
+          <p>
+            Elenco delle richieste collegate a ordini completati. Lo stato indica
+            solo la lavorazione della richiesta; eventuali dati mancanti sono
+            segnalati separatamente.
           </p>
         </div>
-        <div style={heroIcon}>🧾</div>
+        <div className="zi-hero-icon">🧾</div>
       </section>
 
-      <section style={statsGrid}>
+      <section className="zi-stats">
         <Stat label="Totale" value={stats.total} />
-        <Stat label="Registrate" value={stats.registrate} tone="info" />
-        <Stat label="Da controllare" value={stats.pending} tone="warning" />
-        <Stat label="Completate" value={stats.completed} tone="success" />
-        <Stat label="Rifiutate" value={stats.rejected} tone="danger" />
-        <Stat label="Reverse charge" value={stats.reverseCharge} tone="success" />
+        <Stat label="Inviate" value={stats.inviate} tone="warning" />
+        <Stat label="Completate" value={stats.completate} tone="success" />
+        <Stat label="Rifiutate" value={stats.rifiutate} tone="danger" />
+        <Stat label="Reverse charge" value={stats.reverseCharge} tone="info" />
       </section>
 
-      <section style={toolbar}>
+      <section className="zi-toolbar">
         <input
           value={query}
           onChange={(event) => setQuery(event.target.value)}
-          placeholder="Cerca email, azienda, VAT, ordine..."
-          style={searchInput}
+          placeholder="Cerca email, nome, azienda, VAT, CF, ordine..."
         />
 
         <select
           value={statusFilter}
           onChange={(event) => setStatusFilter(event.target.value)}
-          style={select}
         >
           <option value="all">Tutti gli stati</option>
-          <option value="registered">Registrate</option>
-          <option value="pending_review">Da controllare</option>
-          <option value="completed">Completate</option>
-          <option value="rejected">Rifiutate</option>
+          <option value="registered">Inviata</option>
+          <option value="completed">Completata</option>
+          <option value="rejected">Rifiutata</option>
         </select>
 
         <select
           value={typeFilter}
           onChange={(event) => setTypeFilter(event.target.value)}
-          style={select}
         >
           <option value="all">Tutti i tipi</option>
           <option value="private">Privati</option>
-          <option value="company_it">Aziende Italia</option>
+          <option value="company_it">Aziende IT</option>
           <option value="company_foreign">Aziende estere</option>
-          <option value="incomplete">Incomplete</option>
         </select>
       </section>
 
-      <section style={list}>
+      <section className="zi-list">
         {filtered.map((item) => {
-          const warnings = getWarnings(item);
-          const typeLabel = invoiceTypeLabel(item.invoiceType, item.billingCountry);
+          const type = requestType(item);
+          const missing = missingFields(item);
+          const isOpen = openId === item.id;
 
           return (
-            <article key={item.id} style={requestCard}>
-              <div style={summaryGrid}>
-                <div>
-                  <span style={badge(item.status)}>{statusLabel(item.status)}</span>
-                  <span style={typeBadge}>{typeLabel}</span>
-                  {warnings.length > 0 && <span style={warningBadge}>Incompleta</span>}
+            <article key={item.id} className="zi-request-card">
+              <div className="zi-summary">
+                <div className="zi-summary-badges">
+                  <Badge tone={statusTone(item.status)}>{statusLabel(item.status)}</Badge>
+                  <Badge tone={type.tone}>
+                    {type.icon} {type.label}
+                  </Badge>
                 </div>
 
-                <div>
-                  <strong>{item.companyName || item.email || "Richiesta fattura"}</strong>
-                  <div style={muted}>{item.invoiceType === "private" ? `CF: ${item.fiscalCode || "mancante"}` : item.vatNumber || "Nessuna VAT"}</div>
+                <div className="zi-summary-main">
+                  <strong>{mainTitle(item)}</strong>
+                  <span>{subtitle(item)}</span>
                 </div>
 
-                <div>
+                <div className="zi-summary-contact">
                   <strong>{item.email || "Email mancante"}</strong>
-                  <div style={muted}>{item.billingCountry || "Paese non indicato"}</div>
+                  <span>{item.billingCountry ? `Paese ${item.billingCountry}` : "Paese non indicato"}</span>
                 </div>
 
-                <div>
+                <div className="zi-summary-order">
                   <strong>{item.orderName || "Ordine non collegato"}</strong>
-                  <div style={muted}>{formatDate(item.createdAt)}</div>
+                  <span>{formatDate(item.createdAt)}</span>
                 </div>
 
-                <div>
-                  <strong>{item.reverseCharge ? "Reverse charge ✅" : "Reverse charge —"}</strong>
-                  <div style={muted}>Tax exempt {item.taxExemptApplied ? "✅" : "—"}</div>
+                <div className="zi-summary-tax">
+                  <strong>{item.reverseCharge ? "Reverse charge sì" : "Reverse charge —"}</strong>
+                  <span>{item.taxExemptApplied ? "Tax exempt sì" : "Tax exempt —"}</span>
                 </div>
 
                 <button
                   type="button"
-                  style={buttonDark}
-                  onClick={() => setOpenId(openId === item.id ? null : item.id)}
+                  className="zi-open"
+                  onClick={() => setOpenId(isOpen ? null : item.id)}
                 >
-                  {openId === item.id ? "Chiudi" : "Apri"}
+                  {isOpen ? "Chiudi" : "Apri"}
                 </button>
               </div>
 
-              {warnings.length > 0 && (
-                <div style={warningBox}>
-                  <strong>Da controllare:</strong> {warnings.join(" · ")}
+              {missing.length > 0 ? (
+                <div className="zi-warning">
+                  <strong>Da controllare:</strong> {missing.join(" · ")}
+                </div>
+              ) : (
+                <div className="zi-complete">
+                  <strong>Dati completi</strong>
                 </div>
               )}
 
-              {openId === item.id && (
-                <div style={detailBox}>
+              {isOpen && (
+                <div className="zi-detail">
                   <Form method="post">
                     <input type="hidden" name="id" value={item.id} />
 
-                    <div style={detailGrid}>
-                      <section style={card}>
+                    <div className="zi-detail-grid">
+                      <section className="zi-panel">
                         <h2>Cliente</h2>
 
                         <Field label="Email">
-                          <input name="email" defaultValue={item.email || ""} style={input} />
+                          <input name="email" defaultValue={item.email || ""} />
                         </Field>
 
                         <Field label="Nome">
-                          <input name="firstName" defaultValue={item.firstName || ""} style={input} />
+                          <input name="firstName" defaultValue={item.firstName || ""} />
                         </Field>
 
                         <Field label="Cognome">
-                          <input name="lastName" defaultValue={item.lastName || ""} style={input} />
+                          <input name="lastName" defaultValue={item.lastName || ""} />
                         </Field>
 
                         <Field label="Customer ID">
-                          <input name="customerId" defaultValue={item.customerId || ""} style={input} />
+                          <input name="customerId" defaultValue={item.customerId || ""} />
                         </Field>
                       </section>
 
-                      <section style={card}>
+                      <section className="zi-panel">
                         <h2>Dati fattura</h2>
 
                         <Field label="Tipo richiesta">
-                          <select name="invoiceType" defaultValue={item.invoiceType || "private"} style={input}>
+                          <select name="invoiceType" defaultValue={item.invoiceType || "private"}>
                             <option value="private">Privato</option>
                             <option value="company">Azienda</option>
                           </select>
                         </Field>
 
-                        <Field label="Ragione sociale">
-                          <input name="companyName" defaultValue={item.companyName || ""} style={input} />
+                        <Field label="Codice Fiscale">
+                          <input name="fiscalCode" defaultValue={item.fiscalCode || ""} />
                         </Field>
 
-                        <Field label="Codice Fiscale">
-                          <input name="fiscalCode" defaultValue={item.fiscalCode || ""} style={input} />
+                        <Field label="Ragione sociale">
+                          <input name="companyName" defaultValue={item.companyName || ""} />
                         </Field>
 
                         <Field label="Partita IVA / VAT">
-                          <input name="vatNumber" defaultValue={item.vatNumber || ""} style={input} />
+                          <input name="vatNumber" defaultValue={item.vatNumber || ""} />
                         </Field>
 
                         <Field label="Paese">
-                          <input name="billingCountry" defaultValue={item.billingCountry || ""} style={input} />
+                          <input name="billingCountry" defaultValue={item.billingCountry || ""} />
                         </Field>
 
                         <Field label="PEC">
-                          <input name="pec" defaultValue={item.pec || ""} style={input} />
+                          <input name="pec" defaultValue={item.pec || ""} />
                         </Field>
 
                         <Field label="Codice destinatario / SDI">
                           <input
                             name="codiceDestinatario"
                             defaultValue={item.codiceDestinatario || ""}
-                            style={input}
                           />
                         </Field>
                       </section>
 
-                      <section style={card}>
+                      <section className="zi-panel">
                         <h2>Controlli fiscali</h2>
 
                         <Read label="VIES controllato" value={item.viesChecked ? "Sì" : "No"} />
-                        <Read label="VIES valido" value={item.viesValid ? "✅ Valido" : "—"} />
-                        <Read label="Azienda VIES" value={item.viesCompanyName || "-"} />
-
-                        <div style={{ marginTop: 12 }}>
-                          <strong>Indirizzo VIES</strong>
-                          <pre style={pre}>{item.viesAddress || "-"}</pre>
-                        </div>
-
-                        <Read label="Reverse charge" value={item.reverseCharge ? "✅ Sì" : "—"} />
-                        <Read label="Tax exempt" value={item.taxExemptApplied ? "✅ Sì" : "—"} />
+                        <Read label="VIES valido" value={item.viesValid ? "Sì" : "—"} />
+                        <Read label="Azienda VIES" value={item.viesCompanyName || "—"} />
+                        <Read label="Indirizzo VIES" value={item.viesAddress || "—"} multiline />
+                        <Read label="Reverse charge" value={item.reverseCharge ? "Sì" : "—"} />
+                        <Read label="Tax exempt" value={item.taxExemptApplied ? "Sì" : "—"} />
                       </section>
 
-                      <section style={card}>
+                      <section className="zi-panel">
                         <h2>Ordine</h2>
 
                         <Field label="Order ID">
-                          <input name="orderId" defaultValue={item.orderId || ""} style={input} />
+                          <input name="orderId" defaultValue={item.orderId || ""} />
                         </Field>
 
                         <Field label="Nome ordine">
-                          <input name="orderName" defaultValue={item.orderName || ""} style={input} />
+                          <input name="orderName" defaultValue={item.orderName || ""} />
                         </Field>
 
                         <Field label="Checkout token">
-                          <input name="checkoutToken" defaultValue={item.checkoutToken || ""} style={input} />
+                          <input name="checkoutToken" defaultValue={item.checkoutToken || ""} />
                         </Field>
 
-                        <Read label="Cart token" value={item.cartToken || "-"} />
+                        <Read label="Cart token" value={item.cartToken || "—"} />
                         <Read label="Creata il" value={formatDate(item.createdAt)} />
                         <Read label="Aggiornata il" value={formatDate(item.updatedAt)} />
                       </section>
                     </div>
 
-                    <section style={{ ...card, marginTop: 16 }}>
-                      <h2>Azioni</h2>
+                    <section className="zi-actions">
+                      <div>
+                        <h2>Azioni</h2>
+                        <p>
+                          Usa lo stato solo per la lavorazione interna. I dati
+                          mancanti restano visibili sopra alla richiesta.
+                        </p>
+                      </div>
 
-                      <div style={statusActions}>
-                        <button name="intent" value="save" style={buttonGrey}>
+                      <div className="zi-action-buttons">
+                        <button name="intent" value="save" className="zi-button zi-button-grey">
                           Salva modifiche
                         </button>
 
-                        <button name="intent" value="registered" style={buttonBlue}>
-                          Registrata
+                        <button name="intent" value="registered" className="zi-button zi-button-yellow">
+                          Segna inviata
                         </button>
 
-                        <button name="intent" value="pending_review" style={buttonYellow}>
-                          Da controllare
+                        <button name="intent" value="completed" className="zi-button zi-button-green">
+                          Segna completata
                         </button>
 
-                        <button name="intent" value="completed" style={buttonGreen}>
-                          Completata
-                        </button>
-
-                        <button name="intent" value="rejected" style={buttonRed}>
-                          Rifiutata
+                        <button name="intent" value="rejected" className="zi-button zi-button-red">
+                          Rifiuta
                         </button>
 
                         <button
                           name="intent"
                           value="delete"
-                          style={buttonDangerOutline}
+                          className="zi-button zi-button-dark"
                           onClick={(event) => {
-                            if (!window.confirm("Vuoi eliminare definitivamente questa richiesta?")) {
+                            if (!confirm("Eliminare definitivamente questa richiesta?")) {
                               event.preventDefault();
                             }
                           }}
                         >
-                          Cancella riga
+                          Elimina
                         </button>
                       </div>
                     </section>
@@ -476,7 +515,9 @@ export default function InvoiceRequestsPage() {
           );
         })}
 
-        {!filtered.length && <div style={emptyState}>Nessuna richiesta fattura trovata.</div>}
+        {!filtered.length && (
+          <div className="zi-empty">Nessuna richiesta fattura trovata.</div>
+        )}
       </section>
     </div>
   );
@@ -491,310 +532,459 @@ function Stat({
   value: number;
   tone?: "success" | "warning" | "danger" | "info";
 }) {
-  const color =
-    tone === "success"
-      ? "#7f9954"
-      : tone === "warning"
-        ? "#d99a2b"
-        : tone === "danger"
-          ? "#a13a24"
-          : tone === "info"
-            ? "#2f6fed"
-            : "#394122";
-
   return (
-    <div style={statCard}>
-      <div style={{ ...statValue, color }}>{value}</div>
-      <div style={statLabel}>{label}</div>
+    <div className={`zi-stat ${tone ? `zi-stat-${tone}` : ""}`}>
+      <strong>{value}</strong>
+      <span>{label}</span>
     </div>
   );
 }
 
 function Field({ label, children }: any) {
   return (
-    <label style={{ display: "block", marginBottom: 12 }}>
-      <strong style={{ display: "block", marginBottom: 5 }}>{label}</strong>
+    <label className="zi-field">
+      <strong>{label}</strong>
       {children}
     </label>
   );
 }
 
-function Read({ label, value }: any) {
+function Read({ label, value, multiline }: any) {
   return (
-    <div style={{ marginBottom: 12 }}>
-      <strong style={{ display: "block", marginBottom: 5 }}>{label}</strong>
-      <div>{value}</div>
+    <div className="zi-read">
+      <strong>{label}</strong>
+      <span className={multiline ? "zi-read-multiline" : ""}>{value}</span>
     </div>
   );
 }
 
-const page: CSSProperties = {
-  padding: 24,
-  background: "#f5f1df",
-  minHeight: "100vh",
-  color: "#394122",
-};
+function Style() {
+  return (
+    <style>{`
+      .zi-page {
+        padding: 24px;
+        background: #f5f1df;
+        min-height: 100vh;
+        color: #30391f;
+        overflow-x: hidden;
+      }
 
-const hero: CSSProperties = {
-  display: "flex",
-  justifyContent: "space-between",
-  gap: 24,
-  alignItems: "center",
-  background: "linear-gradient(135deg, #aec58b 0%, #f5f1df 66%, #ffd44d 100%)",
-  borderRadius: 34,
-  padding: 34,
-  boxShadow: "0 18px 45px rgba(57,65,34,.12)",
-};
+      .zi-hero {
+        display: flex;
+        justify-content: space-between;
+        gap: 24px;
+        align-items: center;
+        background: linear-gradient(135deg, #aec58b 0%, #f5f1df 66%, #ffd44d 100%);
+        border-radius: 34px;
+        padding: 34px;
+        box-shadow: 0 18px 45px rgba(57,65,34,.12);
+      }
 
-const eyebrow: CSSProperties = {
-  textTransform: "uppercase",
-  letterSpacing: ".08em",
-  fontSize: 13,
-  fontWeight: 900,
-  color: "#6f873d",
-  marginBottom: 10,
-};
+      .zi-eyebrow {
+        text-transform: uppercase;
+        letter-spacing: .08em;
+        font-size: 13px;
+        font-weight: 900;
+        color: #6f873d;
+        margin-bottom: 10px;
+      }
 
-const title: CSSProperties = {
-  margin: 0,
-  fontSize: "clamp(38px, 5vw, 64px)",
-  lineHeight: ".95",
-  fontWeight: 950,
-};
+      .zi-hero h1 {
+        margin: 0;
+        font-size: clamp(38px, 5vw, 70px);
+        line-height: .92;
+        font-weight: 950;
+      }
 
-const subtitle: CSSProperties = {
-  maxWidth: 760,
-  fontSize: 17,
-  lineHeight: 1.45,
-  marginTop: 16,
-};
+      .zi-hero p {
+        max-width: 760px;
+        font-size: 18px;
+        line-height: 1.45;
+        margin: 18px 0 0;
+      }
 
-const heroIcon: CSSProperties = {
-  fontSize: 72,
-  background: "rgba(248,243,223,.78)",
-  width: 140,
-  height: 140,
-  borderRadius: 30,
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "center",
-};
+      .zi-hero-icon {
+        font-size: 72px;
+        background: rgba(248,243,223,.78);
+        width: 150px;
+        height: 150px;
+        border-radius: 34px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        flex: 0 0 auto;
+      }
 
-const statsGrid: CSSProperties = {
-  display: "grid",
-  gridTemplateColumns: "repeat(6, 1fr)",
-  gap: 12,
-  marginTop: 20,
-};
+      .zi-stats {
+        display: grid;
+        grid-template-columns: repeat(5, minmax(0, 1fr));
+        gap: 12px;
+        margin-top: 20px;
+      }
 
-const statCard: CSSProperties = {
-  background: "white",
-  borderRadius: 22,
-  padding: 18,
-  boxShadow: "0 12px 30px rgba(57,65,34,.08)",
-};
+      .zi-stat {
+        background: white;
+        border-radius: 22px;
+        padding: 18px;
+        box-shadow: 0 12px 30px rgba(57,65,34,.08);
+      }
 
-const statValue: CSSProperties = {
-  fontSize: 32,
-  fontWeight: 950,
-  lineHeight: 1,
-};
+      .zi-stat strong {
+        display: block;
+        font-size: 34px;
+        line-height: 1;
+        font-weight: 950;
+        color: #394122;
+      }
 
-const statLabel: CSSProperties = {
-  marginTop: 8,
-  fontWeight: 800,
-  color: "rgba(57,65,34,.72)",
-};
+      .zi-stat span {
+        display: block;
+        margin-top: 8px;
+        font-weight: 900;
+        color: rgba(57,65,34,.72);
+      }
 
-const toolbar: CSSProperties = {
-  display: "grid",
-  gridTemplateColumns: "1fr 210px 210px",
-  gap: 12,
-  marginTop: 20,
-};
+      .zi-stat-success strong { color: #1f7a35; }
+      .zi-stat-warning strong { color: #b87916; }
+      .zi-stat-danger strong { color: #a13a24; }
+      .zi-stat-info strong { color: #2f6fed; }
 
-const searchInput: CSSProperties = {
-  minHeight: 48,
-  border: "1px solid rgba(57,65,34,.18)",
-  borderRadius: 999,
-  padding: "0 18px",
-  fontSize: 15,
-  background: "white",
-};
+      .zi-toolbar {
+        display: grid;
+        grid-template-columns: 1fr 190px 210px;
+        gap: 12px;
+        margin-top: 20px;
+      }
 
-const select: CSSProperties = {
-  ...searchInput,
-};
+      .zi-toolbar input,
+      .zi-toolbar select,
+      .zi-field input,
+      .zi-field select {
+        width: 100%;
+        min-height: 46px;
+        border: 1px solid rgba(57,65,34,.16);
+        border-radius: 999px;
+        padding: 0 18px;
+        font-size: 15px;
+        background: white;
+        box-sizing: border-box;
+      }
 
-const list: CSSProperties = {
-  display: "grid",
-  gap: 12,
-  marginTop: 18,
-};
+      .zi-list {
+        display: grid;
+        gap: 14px;
+        margin-top: 18px;
+      }
 
-const requestCard: CSSProperties = {
-  background: "white",
-  borderRadius: 24,
-  boxShadow: "0 12px 30px rgba(57,65,34,.08)",
-  overflow: "hidden",
-};
+      .zi-request-card {
+        background: white;
+        border-radius: 28px;
+        box-shadow: 0 12px 30px rgba(57,65,34,.08);
+        overflow: hidden;
+      }
 
-const summaryGrid: CSSProperties = {
-  display: "grid",
-  gridTemplateColumns: "210px 1.15fr 1.15fr 1fr 1fr auto",
-  gap: 14,
-  alignItems: "center",
-  padding: 18,
-};
+      .zi-summary {
+        display: grid;
+        grid-template-columns: 170px 1.2fr 1.1fr .9fr .95fr auto;
+        gap: 14px;
+        align-items: center;
+        padding: 20px;
+      }
 
-function badge(status: string): CSSProperties {
-  return {
-    display: "inline-flex",
-    background: statusColor(status),
-    borderRadius: 999,
-    padding: "7px 11px",
-    fontWeight: 900,
-    fontSize: 13,
-    marginRight: 6,
-    marginBottom: 6,
-  };
+      .zi-summary-badges {
+        display: flex;
+        gap: 7px;
+        flex-wrap: wrap;
+      }
+
+      .zi-summary-main strong,
+      .zi-summary-contact strong,
+      .zi-summary-order strong,
+      .zi-summary-tax strong {
+        display: block;
+        font-size: 16px;
+        overflow-wrap: anywhere;
+      }
+
+      .zi-summary-main span,
+      .zi-summary-contact span,
+      .zi-summary-order span,
+      .zi-summary-tax span {
+        display: block;
+        color: rgba(57,65,34,.62);
+        margin-top: 4px;
+        font-size: 13px;
+        overflow-wrap: anywhere;
+      }
+
+      .zi-badge {
+        display: inline-flex;
+        align-items: center;
+        border-radius: 999px;
+        padding: 7px 12px;
+        font-weight: 950;
+        font-size: 13px;
+        white-space: nowrap;
+      }
+
+      .zi-badge-success { background: #dff3df; color: #1e5d2a; }
+      .zi-badge-danger { background: #ffe1dc; color: #812511; }
+      .zi-badge-warning { background: #fff0bd; color: #6b4708; }
+      .zi-badge-info { background: #e5f0ff; color: #184a9c; }
+      .zi-badge-neutral { background: #eeeeea; color: #394122; }
+
+      .zi-open {
+        min-height: 44px;
+        border: 0;
+        border-radius: 999px;
+        background: #303a21;
+        color: white;
+        padding: 0 18px;
+        font-weight: 950;
+        cursor: pointer;
+      }
+
+      .zi-warning,
+      .zi-complete {
+        margin: 0 20px 20px;
+        border-radius: 18px;
+        padding: 13px 16px;
+        line-height: 1.35;
+      }
+
+      .zi-warning {
+        background: #fff7dc;
+        border: 1px solid #f3c24e;
+        color: #5b3b05;
+      }
+
+      .zi-complete {
+        background: #edf8ea;
+        border: 1px solid #b8dfae;
+        color: #245c27;
+      }
+
+      .zi-detail {
+        padding: 20px;
+        background: #f7f2df;
+        border-top: 1px solid #efe4bd;
+      }
+
+      .zi-detail-grid {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 14px;
+      }
+
+      .zi-panel {
+        background: white;
+        border: 1px solid #efe4bd;
+        border-radius: 20px;
+        padding: 18px;
+      }
+
+      .zi-panel h2,
+      .zi-actions h2 {
+        margin: 0 0 16px;
+        font-size: 24px;
+      }
+
+      .zi-field {
+        display: block;
+        margin-bottom: 13px;
+      }
+
+      .zi-field strong,
+      .zi-read strong {
+        display: block;
+        margin-bottom: 6px;
+        font-weight: 950;
+      }
+
+      .zi-read {
+        margin-bottom: 13px;
+      }
+
+      .zi-read span {
+        display: block;
+        overflow-wrap: anywhere;
+      }
+
+      .zi-read-multiline {
+        white-space: pre-wrap;
+        background: #f7f7f7;
+        padding: 12px;
+        border-radius: 12px;
+      }
+
+      .zi-actions {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 20px;
+        align-items: center;
+        background: white;
+        border: 1px solid #efe4bd;
+        border-radius: 20px;
+        padding: 18px;
+        margin-top: 14px;
+      }
+
+      .zi-actions p {
+        margin: 0;
+        color: rgba(57,65,34,.7);
+      }
+
+      .zi-action-buttons {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+      }
+
+      .zi-button {
+        min-height: 42px;
+        border: 0;
+        border-radius: 999px;
+        padding: 0 16px;
+        font-weight: 950;
+        cursor: pointer;
+      }
+
+      .zi-button-grey { background: #e6e6df; color: #2f3521; }
+      .zi-button-yellow { background: #c9902f; color: white; }
+      .zi-button-green { background: #1f7a35; color: white; }
+      .zi-button-red { background: #9f2f1f; color: white; }
+      .zi-button-dark { background: #303a21; color: white; }
+
+      .zi-empty {
+        background: white;
+        border-radius: 24px;
+        padding: 28px;
+        text-align: center;
+        color: rgba(57,65,34,.7);
+      }
+
+      @media (max-width: 980px) {
+        .zi-page {
+          padding: 12px;
+        }
+
+        .zi-hero {
+          display: block;
+          padding: 22px;
+          border-radius: 26px;
+        }
+
+        .zi-hero h1 {
+          font-size: 40px;
+        }
+
+        .zi-hero p {
+          font-size: 15px;
+        }
+
+        .zi-hero-icon {
+          display: none;
+        }
+
+        .zi-stats {
+          display: flex;
+          overflow-x: auto;
+          padding-bottom: 4px;
+          scroll-snap-type: x mandatory;
+        }
+
+        .zi-stat {
+          min-width: 128px;
+          scroll-snap-align: start;
+        }
+
+        .zi-toolbar {
+          grid-template-columns: 1fr;
+        }
+
+        .zi-toolbar input,
+        .zi-toolbar select {
+          min-height: 50px;
+          font-size: 16px;
+        }
+
+        .zi-summary {
+          grid-template-columns: 1fr auto;
+          gap: 12px;
+          padding: 18px;
+        }
+
+        .zi-summary-badges {
+          grid-column: 1 / -1;
+          order: 1;
+        }
+
+        .zi-summary-main {
+          grid-column: 1 / 2;
+          order: 2;
+        }
+
+        .zi-open {
+          grid-column: 2 / 3;
+          grid-row: 2 / 3;
+          order: 3;
+          align-self: start;
+          min-width: 78px;
+        }
+
+        .zi-summary-contact {
+          grid-column: 1 / -1;
+          order: 4;
+        }
+
+        .zi-summary-order {
+          grid-column: 1 / -1;
+          order: 5;
+        }
+
+        .zi-summary-tax {
+          grid-column: 1 / -1;
+          order: 6;
+        }
+
+        .zi-summary-main strong {
+          font-size: 20px;
+        }
+
+        .zi-warning,
+        .zi-complete {
+          margin: 0 18px 18px;
+          font-size: 15px;
+        }
+
+        .zi-detail {
+          padding: 14px;
+        }
+
+        .zi-detail-grid {
+          grid-template-columns: 1fr;
+        }
+
+        .zi-panel {
+          padding: 16px;
+        }
+
+        .zi-actions {
+          grid-template-columns: 1fr;
+        }
+
+        .zi-action-buttons {
+          display: grid;
+          grid-template-columns: 1fr;
+          justify-content: stretch;
+        }
+
+        .zi-button {
+          width: 100%;
+          min-height: 48px;
+        }
+      }
+    `}</style>
+  );
 }
-
-const typeBadge: CSSProperties = {
-  display: "inline-flex",
-  background: "rgba(57,65,34,.08)",
-  borderRadius: 999,
-  padding: "7px 11px",
-  fontWeight: 900,
-  fontSize: 13,
-  marginRight: 6,
-  marginBottom: 6,
-};
-
-const warningBadge: CSSProperties = {
-  display: "inline-flex",
-  background: "#fff3cd",
-  color: "#5f3b00",
-  borderRadius: 999,
-  padding: "7px 11px",
-  fontWeight: 900,
-  fontSize: 13,
-  marginBottom: 6,
-};
-
-const warningBox: CSSProperties = {
-  margin: "0 18px 16px",
-  padding: "12px 14px",
-  background: "#fff8df",
-  border: "1px solid #f3d27a",
-  borderRadius: 16,
-  color: "#5f3b00",
-  fontSize: 14,
-};
-
-const muted: CSSProperties = {
-  color: "rgba(57,65,34,.64)",
-  fontSize: 13,
-  marginTop: 4,
-};
-
-const detailBox: CSSProperties = {
-  padding: 18,
-  background: "#f7f2df",
-  borderTop: "1px solid #efe4bd",
-};
-
-const detailGrid: CSSProperties = {
-  display: "grid",
-  gridTemplateColumns: "repeat(4, 1fr)",
-  gap: 14,
-};
-
-const card: CSSProperties = {
-  background: "white",
-  border: "1px solid #efe4bd",
-  borderRadius: 18,
-  padding: 16,
-};
-
-const input: CSSProperties = {
-  width: "100%",
-  minHeight: 42,
-  border: "1px solid #ddd",
-  borderRadius: 999,
-  padding: "0 14px",
-  background: "white",
-};
-
-const pre: CSSProperties = {
-  whiteSpace: "pre-wrap",
-  background: "#f7f7f7",
-  padding: 12,
-  borderRadius: 12,
-};
-
-const statusActions: CSSProperties = {
-  display: "grid",
-  gridTemplateColumns: "repeat(6, 1fr)",
-  gap: 10,
-};
-
-const buttonBase: CSSProperties = {
-  minHeight: 42,
-  border: 0,
-  borderRadius: 999,
-  fontWeight: 900,
-  cursor: "pointer",
-};
-
-const buttonDark: CSSProperties = {
-  ...buttonBase,
-  background: "#303a21",
-  color: "white",
-  padding: "0 16px",
-};
-
-const buttonGrey: CSSProperties = {
-  ...buttonBase,
-  background: "#ddd",
-  color: "#222",
-};
-
-const buttonBlue: CSSProperties = {
-  ...buttonBase,
-  background: "#2f6fed",
-  color: "white",
-};
-
-const buttonGreen: CSSProperties = {
-  ...buttonBase,
-  background: "#1f7a35",
-  color: "white",
-};
-
-const buttonYellow: CSSProperties = {
-  ...buttonBase,
-  background: "#c9902f",
-  color: "white",
-};
-
-const buttonRed: CSSProperties = {
-  ...buttonBase,
-  background: "#9f2f1f",
-  color: "white",
-};
-
-const buttonDangerOutline: CSSProperties = {
-  ...buttonBase,
-  background: "white",
-  color: "#9f2f1f",
-  border: "1px solid #9f2f1f",
-};
-
-const emptyState: CSSProperties = {
-  background: "white",
-  borderRadius: 24,
-  padding: 28,
-  textAlign: "center",
-  color: "rgba(57,65,34,.7)",
-};
