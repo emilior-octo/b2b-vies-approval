@@ -191,14 +191,27 @@ function getAddressCountry(orderApi: any) {
 }
 
 async function graphQL(admin: any, query: string, variables: any = {}) {
-  const response = await admin.graphql(query, { variables });
-  const data = await response.json();
+  try {
+    const response = await admin.graphql(query, { variables });
+    const data = await response.json();
 
-  if (data?.errors?.length) {
-    console.error("GraphQL errors:", JSON.stringify(data.errors));
+    if (data?.errors?.length) {
+      console.error("GraphQL errors:", JSON.stringify(data.errors, null, 2));
+    }
+
+    return data;
+  } catch (error: any) {
+    console.error("GraphQL request failed:", {
+      message: error?.message || String(error),
+      graphQLErrors: error?.graphQLErrors || error?.errors?.graphQLErrors || [],
+      errors: error?.errors || null,
+    });
+
+    return {
+      errors: error?.graphQLErrors || error?.errors?.graphQLErrors || [{ message: error?.message || String(error) }],
+      data: null,
+    };
   }
-
-  return data;
 }
 
 async function getOrderApiData(admin: any, orderGid: string) {
@@ -212,15 +225,6 @@ async function getOrderApiData(admin: any, orderGid: string) {
           note
           email
           customAttributes { key value }
-          localizationExtensions(first: 20) {
-            nodes {
-              key
-              value
-              title
-              countryCode
-              purpose
-            }
-          }
           billingAddress { firstName lastName company countryCodeV2 }
           shippingAddress { firstName lastName company countryCodeV2 }
           customer {
@@ -240,11 +244,6 @@ async function getOrderApiData(admin: any, orderGid: string) {
             reverseCharge: metafield(namespace: "custom", key: "reverse_charge") { value }
             allMetafields: metafields(first: 100) {
               nodes { namespace key value }
-            }
-            companyContactProfiles(first: 5) {
-              nodes {
-                company { id name }
-              }
             }
             b2bMetafields: metafields(first: 40, namespace: "b2b") {
               nodes { key value }
@@ -720,11 +719,41 @@ export const action = async ({ request }: any) => {
     const orderPayload = payload;
     const orderGid = getOrderGid(orderPayload);
     const { admin } = await unauthenticated.admin(shop);
-    const orderApi = await getOrderApiData(admin, orderGid);
+    let orderApi = await getOrderApiData(admin, orderGid);
 
     if (!orderApi) {
-      console.error("Order GraphQL read returned null", { orderGid });
-      return new Response("OK");
+      console.error("Order GraphQL read returned null; using webhook payload fallback", { orderGid });
+      orderApi = {
+        id: orderGid,
+        name: orderPayload?.name || "",
+        note: orderPayload?.note || "",
+        email: orderPayload?.email || orderPayload?.contact_email || "",
+        customAttributes: getWebhookAttributes(orderPayload).map((item: any) => ({
+          key: readPairKey(item),
+          value: readPairValue(item),
+        })),
+        localizationExtensions: { nodes: [] },
+        billingAddress: {
+          firstName: orderPayload?.billing_address?.first_name || "",
+          lastName: orderPayload?.billing_address?.last_name || "",
+          company: orderPayload?.billing_address?.company || "",
+          countryCodeV2: orderPayload?.billing_address?.country_code || "",
+        },
+        shippingAddress: {
+          firstName: orderPayload?.shipping_address?.first_name || "",
+          lastName: orderPayload?.shipping_address?.last_name || "",
+          company: orderPayload?.shipping_address?.company || "",
+          countryCodeV2: orderPayload?.shipping_address?.country_code || "",
+        },
+        customer: {
+          id: orderPayload?.customer?.admin_graphql_api_id || (orderPayload?.customer?.id ? `gid://shopify/Customer/${orderPayload.customer.id}` : ""),
+          email: orderPayload?.customer?.email || orderPayload?.email || "",
+          firstName: orderPayload?.customer?.first_name || "",
+          lastName: orderPayload?.customer?.last_name || "",
+          allMetafields: { nodes: [] },
+          b2bMetafields: { nodes: [] },
+        },
+      };
     }
 
     const webhookPairs = getWebhookAttributes(orderPayload);
@@ -950,6 +979,6 @@ export const action = async ({ request }: any) => {
     return new Response("OK");
   } catch (error) {
     console.error("orders/create webhook error:", error);
-    return new Response("ERROR", { status: 500 });
+    return new Response("OK - webhook error logged", { status: 200 });
   }
 };
