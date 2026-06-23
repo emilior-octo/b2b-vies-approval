@@ -157,9 +157,19 @@ function getAttrFromPairs(pairs: any[], keys: string[]) {
   return "";
 }
 
+function getLocalizedFieldNodes(orderApi: any) {
+  const legacyNodes = orderApi?.localizationExtensions?.nodes || [];
+  const localizedNodes = orderApi?.localizedFields?.nodes || [];
+  const localizedEdgeNodes = (orderApi?.localizedFields?.edges || [])
+    .map((edge: any) => edge?.node)
+    .filter(Boolean);
+
+  return [...legacyNodes, ...localizedNodes, ...localizedEdgeNodes];
+}
+
 function getLocalizationValue(orderApi: any, keys: string[]) {
   const wanted = keys.map(normalizeKey).filter(Boolean);
-  const nodes = orderApi?.localizationExtensions?.nodes || [];
+  const nodes = getLocalizedFieldNodes(orderApi);
 
   for (const node of nodes) {
     // IMPORTANT: do not use purpose here. Shopify often uses a generic purpose
@@ -212,6 +222,41 @@ async function graphQL(admin: any, query: string, variables: any = {}) {
       errors: error?.graphQLErrors || error?.errors?.graphQLErrors || [{ message: error?.message || String(error) }],
     };
   }
+}
+
+async function getOrderLocalizedFields(admin: any, orderGid: string) {
+  const data = await graphQL(
+    admin,
+    `#graphql
+      query OrderLocalizedFields($id: ID!) {
+        order(id: $id) {
+          id
+          localizedFields(first: 50) {
+            edges {
+              node {
+                countryCode
+                key
+                purpose
+                title
+                value
+              }
+            }
+          }
+        }
+      }
+    `,
+    { id: orderGid },
+  );
+
+  if (data?.errors?.length) {
+    console.error("[orders/create] localizedFields query failed", {
+      orderGid,
+      errors: data.errors,
+    });
+    return { nodes: [], edges: [] };
+  }
+
+  return data?.data?.order?.localizedFields || { nodes: [], edges: [] };
 }
 
 async function getOrderApiData(admin: any, orderGid: string) {
@@ -730,6 +775,9 @@ export const action = async ({ request }: any) => {
     let orderApi: any = null;
     try {
       orderApi = await getOrderApiData(admin, orderGid);
+      if (orderApi) {
+        orderApi.localizedFields = await getOrderLocalizedFields(admin, orderGid);
+      }
     } catch (error) {
       console.error("[orders/create] Order fiscal data enrichment crashed", error);
       orderApi = null;
@@ -743,6 +791,7 @@ export const action = async ({ request }: any) => {
         note: orderPayload?.note || "",
         email: orderPayload?.email || orderPayload?.contact_email || "",
         customAttributes: [],
+        localizedFields: { nodes: [], edges: [] },
         billingAddress: {
           firstName: orderPayload?.billing_address?.first_name || "",
           lastName: orderPayload?.billing_address?.last_name || "",
@@ -795,7 +844,7 @@ export const action = async ({ request }: any) => {
         key: readPairKey(item),
         hasValue: Boolean(readPairValue(item)),
       })),
-      localizationExtensions: (orderApi?.localizationExtensions?.nodes || []).map((item: any) => ({
+      localizedFields: getLocalizedFieldNodes(orderApi).map((item: any) => ({
         countryCode: item?.countryCode,
         key: item?.key,
         title: item?.title,
