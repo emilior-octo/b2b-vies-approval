@@ -39,6 +39,40 @@ export async function action({ request }: any) {
   const intent = String(formData.get("intent") || "");
   const id = String(formData.get("id") || "");
 
+  if (intent === "bulk_approve_pending") {
+    await db.b2BApplication.updateMany({
+      where: {
+        status: "pending_review",
+      },
+      data: {
+        status: "approved",
+        approvedAt: new Date(),
+        rejectedAt: null,
+        reviewNotes:
+          "Approvata massivamente dall'app: richieste pending segnate come approvate manualmente.",
+      },
+    });
+
+    return null;
+  }
+
+  if (intent === "bulk_approve_rejected") {
+    await db.b2BApplication.updateMany({
+      where: {
+        status: "rejected",
+      },
+      data: {
+        status: "approved",
+        approvedAt: new Date(),
+        rejectedAt: null,
+        reviewNotes:
+          "Approvata massivamente dall'app: richieste rifiutate riaperte e segnate come approvate manualmente.",
+      },
+    });
+
+    return null;
+  }
+
   if (intent === "bulk_approve_synced_pending") {
     await db.b2BApplication.updateMany({
       where: {
@@ -81,7 +115,7 @@ export async function action({ request }: any) {
         rejectedAt: null,
         reviewNotes: appendNote(
           application.reviewNotes,
-          "Approvata manualmente dall'app. Company già creata/sincronizzata.",
+          "Approvata manualmente dall'app dall'operatore.",
         ),
       },
     });
@@ -246,34 +280,67 @@ export default function ApplicationsPage() {
         <Stat label="Rifiutate" value={stats.rejected} tone="danger" />
       </section>
 
-      {stats.pendingSynced > 0 && (
+      {(stats.pending > 0 || stats.rejected > 0 || stats.pendingSynced > 0) && (
         <section className="zbe-bulk-box">
           <div>
-            <strong>Richieste legacy già sincronizzate</strong>
+            <strong>Azioni massive</strong>
             <p>
-              Ci sono {stats.pendingSynced} richieste in revisione con Company Shopify già creata.
-              Puoi segnarle come approvate senza ricreare nulla.
+              Approva in blocco le richieste B2B in revisione o rifiutate. Questa azione aggiorna lo stato nell'app senza ricreare clienti o company Shopify.
             </p>
           </div>
 
-          <Form method="post">
-            <input type="hidden" name="intent" value="bulk_approve_synced_pending" />
-            <button
-              className="zbe-button zbe-button--green"
-              type="submit"
-              onClick={(event) => {
-                if (
-                  !window.confirm(
-                    `Approvare ${stats.pendingSynced} richieste pending già sincronizzate?`,
-                  )
-                ) {
-                  event.preventDefault();
-                }
-              }}
-            >
-              Approva sincronizzate
-            </button>
-          </Form>
+          <div className="zbe-bulk-actions">
+            {stats.pending > 0 && (
+              <Form method="post">
+                <input type="hidden" name="intent" value="bulk_approve_pending" />
+                <button
+                  className="zbe-button zbe-button--green"
+                  type="submit"
+                  onClick={(event) => {
+                    if (!window.confirm(`Approvare manualmente tutte le ${stats.pending} richieste in revisione?`)) {
+                      event.preventDefault();
+                    }
+                  }}
+                >
+                  Approva tutti i pending
+                </button>
+              </Form>
+            )}
+
+            {stats.rejected > 0 && (
+              <Form method="post">
+                <input type="hidden" name="intent" value="bulk_approve_rejected" />
+                <button
+                  className="zbe-button zbe-button--green"
+                  type="submit"
+                  onClick={(event) => {
+                    if (!window.confirm(`Approvare manualmente tutte le ${stats.rejected} richieste rifiutate?`)) {
+                      event.preventDefault();
+                    }
+                  }}
+                >
+                  Approva tutte le rifiutate
+                </button>
+              </Form>
+            )}
+
+            {stats.pendingSynced > 0 && (
+              <Form method="post">
+                <input type="hidden" name="intent" value="bulk_approve_synced_pending" />
+                <button
+                  className="zbe-button zbe-button--outline"
+                  type="submit"
+                  onClick={(event) => {
+                    if (!window.confirm(`Approvare ${stats.pendingSynced} richieste pending già sincronizzate?`)) {
+                      event.preventDefault();
+                    }
+                  }}
+                >
+                  Approva solo sincronizzate
+                </button>
+              </Form>
+            )}
+          </div>
         </section>
       )}
 
@@ -298,8 +365,7 @@ export default function ApplicationsPage() {
       <section className="zbe-list">
         {filtered.map((app) => {
           const isOpen = openId === app.id;
-          const canApproveStatusOnly =
-            app.status !== "approved" && Boolean(app.shopifyCompanyId);
+          const canApproveStatusOnly = app.status !== "approved";
 
           return (
             <article key={app.id} className="zbe-request">
@@ -431,7 +497,7 @@ export default function ApplicationsPage() {
                           value="approve_status_only"
                           type="submit"
                         >
-                          Segna approvata
+                          Approva manualmente
                         </button>
                       </Form>
                     )}
