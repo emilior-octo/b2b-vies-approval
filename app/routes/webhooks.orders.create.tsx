@@ -196,20 +196,20 @@ async function graphQL(admin: any, query: string, variables: any = {}) {
     const data = await response.json();
 
     if (data?.errors?.length) {
-      console.error("GraphQL errors:", JSON.stringify(data.errors, null, 2));
+      console.error("[orders/create] GraphQL response errors", JSON.stringify(data.errors, null, 2));
     }
 
     return data;
   } catch (error: any) {
-    console.error("GraphQL request failed:", {
+    console.error("[orders/create] GraphQL client error", {
       message: error?.message || String(error),
       graphQLErrors: error?.graphQLErrors || error?.errors?.graphQLErrors || [],
       errors: error?.errors || null,
     });
 
     return {
-      errors: error?.graphQLErrors || error?.errors?.graphQLErrors || [{ message: error?.message || String(error) }],
       data: null,
+      errors: error?.graphQLErrors || error?.errors?.graphQLErrors || [{ message: error?.message || String(error) }],
     };
   }
 }
@@ -254,6 +254,13 @@ async function getOrderApiData(admin: any, orderGid: string) {
     `,
     { id: orderGid },
   );
+
+  if (data?.errors?.length) {
+    console.error("[orders/create] Order fiscal data query failed", {
+      orderGid,
+      errors: data.errors,
+    });
+  }
 
   return data?.data?.order || null;
 }
@@ -719,20 +726,23 @@ export const action = async ({ request }: any) => {
     const orderPayload = payload;
     const orderGid = getOrderGid(orderPayload);
     const { admin } = await unauthenticated.admin(shop);
-    let orderApi = await getOrderApiData(admin, orderGid);
+
+    let orderApi: any = null;
+    try {
+      orderApi = await getOrderApiData(admin, orderGid);
+    } catch (error) {
+      console.error("[orders/create] Order fiscal data enrichment crashed", error);
+      orderApi = null;
+    }
 
     if (!orderApi) {
-      console.error("Order GraphQL read returned null; using webhook payload fallback", { orderGid });
+      console.error("[orders/create] Continuing with webhook payload fallback only", { orderGid });
       orderApi = {
         id: orderGid,
         name: orderPayload?.name || "",
         note: orderPayload?.note || "",
         email: orderPayload?.email || orderPayload?.contact_email || "",
-        customAttributes: getWebhookAttributes(orderPayload).map((item: any) => ({
-          key: readPairKey(item),
-          value: readPairValue(item),
-        })),
-        localizationExtensions: { nodes: [] },
+        customAttributes: [],
         billingAddress: {
           firstName: orderPayload?.billing_address?.first_name || "",
           lastName: orderPayload?.billing_address?.last_name || "",
@@ -745,14 +755,16 @@ export const action = async ({ request }: any) => {
           company: orderPayload?.shipping_address?.company || "",
           countryCodeV2: orderPayload?.shipping_address?.country_code || "",
         },
-        customer: {
-          id: orderPayload?.customer?.admin_graphql_api_id || (orderPayload?.customer?.id ? `gid://shopify/Customer/${orderPayload.customer.id}` : ""),
-          email: orderPayload?.customer?.email || orderPayload?.email || "",
-          firstName: orderPayload?.customer?.first_name || "",
-          lastName: orderPayload?.customer?.last_name || "",
-          allMetafields: { nodes: [] },
-          b2bMetafields: { nodes: [] },
-        },
+        customer: orderPayload?.customer
+          ? {
+              id: orderPayload.customer.admin_graphql_api_id || (orderPayload.customer.id ? `gid://shopify/Customer/${orderPayload.customer.id}` : ""),
+              email: orderPayload.customer.email || "",
+              firstName: orderPayload.customer.first_name || "",
+              lastName: orderPayload.customer.last_name || "",
+              allMetafields: { nodes: [] },
+              b2bMetafields: { nodes: [] },
+            }
+          : null,
       };
     }
 
@@ -904,21 +916,6 @@ export const action = async ({ request }: any) => {
         }
       }
 
-      const b2bMetaForCompany = getB2BMeta(orderApi);
-      const customerCompany = getCustomerCompanyFromOrder(
-        orderApi,
-        b2bMetaForCompany,
-      );
-      try {
-        await updateCompanyNameFromCheckout(
-          admin,
-          customerCompany.id,
-          customerCompany.name,
-          invoiceData,
-        );
-      } catch (error) {
-        console.error("Invoice company name update failed:", error);
-      }
 
       tags.push("invoice_request");
       if (yes(invoiceData.reverseCharge)) tags.push("reverse_charge");
