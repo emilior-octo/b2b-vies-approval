@@ -1,92 +1,91 @@
 import { Form, useLoaderData } from "react-router";
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import type { CSSProperties } from "react";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
+
+const MANAGED_B2B_TAGS = [
+  "b2b_pending_review",
+  "b2b_rejected",
+  "b2b_customer",
+  "b2b_auto_approved",
+  "b2b_manually_approved",
+  "vat_verified",
+];
 
 export async function loader({ request }: any) {
   await authenticate.admin(request);
 
   const applications = await db.b2BApplication.findMany({
     orderBy: { createdAt: "desc" },
-    take: 250,
+    take: 100,
   });
 
-  const stats = {
-    total: applications.length,
-    pending: applications.filter((item) => item.status === "pending_review").length,
-    approved: applications.filter((item) => item.status === "approved").length,
-    rejected: applications.filter((item) => item.status === "rejected").length,
-    pendingSynced: applications.filter(
-      (item) => item.status === "pending_review" && item.shopifyCompanyId,
-    ).length,
-  };
-
-  return { applications, stats };
-}
-
-function appendNote(current: string | null | undefined, note: string) {
-  const existing = String(current || "").trim();
-  if (!existing) return note;
-  if (existing.includes(note)) return existing;
-  return `${existing}\n${note}`;
+  return { applications };
 }
 
 export async function action({ request }: any) {
-  await authenticate.admin(request);
+  const { admin } = await authenticate.admin(request);
 
   const formData = await request.formData();
-  const intent = String(formData.get("intent") || "");
+
   const id = String(formData.get("id") || "");
+  const intent = String(formData.get("intent") || "");
+
+  if (intent === "bulk_reset_to_pending") {
+    await db.b2BApplication.updateMany({
+      where: {
+        status: { in: ["approved", "rejected"] },
+      },
+      data: {
+        status: "pending_review",
+        approvedAt: null,
+        rejectedAt: null,
+        reviewNotes: "Rimessa in revisione con azione massiva.",
+      },
+    });
+
+    return null;
+  }
 
   if (intent === "bulk_approve_pending") {
-    await db.b2BApplication.updateMany({
-      where: {
-        status: "pending_review",
-      },
-      data: {
-        status: "approved",
-        approvedAt: new Date(),
-        rejectedAt: null,
-        reviewNotes:
-          "Approvata massivamente dall'app: richieste pending segnate come approvate manualmente.",
-      },
+    const pendingApplications = await db.b2BApplication.findMany({
+      where: { status: "pending_review" },
+      orderBy: { createdAt: "asc" },
+      take: 250,
     });
 
-    return null;
-  }
+    for (const application of pendingApplications) {
+      try {
+        const shopifyWrite = await syncApplicationToShopify(admin, application, "approved");
 
-  if (intent === "bulk_approve_rejected") {
-    await db.b2BApplication.updateMany({
-      where: {
-        status: "rejected",
-      },
-      data: {
-        status: "approved",
-        approvedAt: new Date(),
-        rejectedAt: null,
-        reviewNotes:
-          "Approvata massivamente dall'app: richieste rifiutate riaperte e segnate come approvate manualmente.",
-      },
-    });
-
-    return null;
-  }
-
-  if (intent === "bulk_approve_synced_pending") {
-    await db.b2BApplication.updateMany({
-      where: {
-        status: "pending_review",
-        shopifyCompanyId: { not: null },
-      },
-      data: {
-        status: "approved",
-        approvedAt: new Date(),
-        rejectedAt: null,
-        reviewNotes:
-          "Approvata massivamente: Company Shopify già creata/sincronizzata.",
-      },
-    });
+        await db.b2BApplication.update({
+          where: { id: application.id },
+          data: {
+            status: "approved",
+            approvedAt: new Date(),
+            rejectedAt: null,
+            reviewNotes: "Approvata con azione massiva. Company/tag/metafield sincronizzati se mancanti.",
+            shopifyCustomerId:
+              shopifyWrite.customer?.id || application.shopifyCustomerId || null,
+            shopifyCompanyId:
+              shopifyWrite.company?.companyId || application.shopifyCompanyId || null,
+            shopifyCompanyLocationId:
+              shopifyWrite.company?.companyLocationId ||
+              application.shopifyCompanyLocationId ||
+              null,
+          },
+        });
+      } catch (error: any) {
+        await db.b2BApplication.update({
+          where: { id: application.id },
+          data: {
+            status: "pending_review",
+            reviewNotes: `Errore approvazione massiva: ${error?.message || "Errore imprevisto"}`,
+          },
+        });
+      }
+    }
 
     return null;
   }
@@ -95,89 +94,79 @@ export async function action({ request }: any) {
     throw new Response("Missing application id", { status: 400 });
   }
 
-  if (intent === "save_edits") {
-    const application = await db.b2BApplication.findUnique({ where: { id } });
+  const baseData = {
+    email: String(formData.get("email") || "").trim(),
+    firstName: String(formData.get("firstName") || "").trim() || null,
+    lastName: String(formData.get("lastName") || "").trim() || null,
+    companyNameSubmitted: String(formData.get("companyNameSubmitted") || "").trim(),
+    vatNumberSubmitted: normalizeVat(String(formData.get("vatNumberSubmitted") || "")),
+    billingCountry: String(formData.get("billingCountry") || "").trim() || null,
+    pec: String(formData.get("pec") || "").trim() || null,
+    codiceDestinatario: String(formData.get("codiceDestinatario") || "").trim() || null,
+    reviewNotes: String(formData.get("reviewNotes") || "").trim() || null,
+  };
 
-    if (!application) {
-      throw new Response("Application not found", { status: 404 });
-    }
-
-    const operatorNote = "Dati richiesta modificati manualmente dall'operatore.";
-
+  if (intent === "save") {
     await db.b2BApplication.update({
       where: { id },
-      data: {
-        companyNameSubmitted: cleanText(formData.get("companyNameSubmitted")),
-        email: cleanText(formData.get("email")),
-        firstName: cleanText(formData.get("firstName")),
-        lastName: cleanText(formData.get("lastName")),
-        vatNumberSubmitted: cleanUpper(formData.get("vatNumberSubmitted")),
-        billingCountry: cleanUpper(formData.get("billingCountry")),
-        pec: cleanText(formData.get("pec")),
-        codiceDestinatario: cleanText(formData.get("codiceDestinatario")),
-        viesValid: cleanViesValid(formData.get("viesValid")),
-        viesCompanyName: cleanText(formData.get("viesCompanyName")),
-        viesCountryCode: cleanUpper(formData.get("viesCountryCode")),
-        viesVatNumber: cleanUpper(formData.get("viesVatNumber")),
-        matchScore: cleanMatchScore(formData.get("matchScore")),
-        viesAddress: cleanText(formData.get("viesAddress")),
-        shopifyCustomerId: cleanText(formData.get("shopifyCustomerId")),
-        shopifyCompanyId: cleanText(formData.get("shopifyCompanyId")),
-        shopifyCompanyLocationId: cleanText(formData.get("shopifyCompanyLocationId")),
-        reviewNotes: appendNote(cleanText(formData.get("reviewNotes")), operatorNote),
-      },
-    });
-
-    return null;
-  }
-
-  if (intent === "delete") {
-    await db.b2BApplication.delete({ where: { id } });
-    return null;
-  }
-
-  if (intent === "approve_status_only") {
-    const application = await db.b2BApplication.findUnique({ where: { id } });
-
-    if (!application) {
-      throw new Response("Application not found", { status: 404 });
-    }
-
-    await db.b2BApplication.update({
-      where: { id },
-      data: {
-        status: "approved",
-        approvedAt: new Date(),
-        rejectedAt: null,
-        reviewNotes: appendNote(
-          application.reviewNotes,
-          "Approvata manualmente dall'app dall'operatore.",
-        ),
-      },
-    });
-
-    return null;
-  }
-
-  if (intent === "reject") {
-    await db.b2BApplication.update({
-      where: { id },
-      data: {
-        status: "rejected",
-        rejectedAt: new Date(),
-      },
+      data: baseData,
     });
 
     return null;
   }
 
   if (intent === "pending") {
-    await db.b2BApplication.update({
+    const application = await db.b2BApplication.update({
       where: { id },
       data: {
+        ...baseData,
         status: "pending_review",
         approvedAt: null,
         rejectedAt: null,
+      },
+    });
+
+    await syncApplicationToShopify(admin, application, "pending_review");
+
+    return null;
+  }
+
+  if (intent === "reject") {
+    const application = await db.b2BApplication.update({
+      where: { id },
+      data: {
+        ...baseData,
+        status: "rejected",
+        rejectedAt: new Date(),
+        approvedAt: null,
+      },
+    });
+
+    await syncApplicationToShopify(admin, application, "rejected");
+
+    return null;
+  }
+
+  if (intent === "approve") {
+    const application = await db.b2BApplication.update({
+      where: { id },
+      data: {
+        ...baseData,
+        status: "approved",
+        approvedAt: new Date(),
+        rejectedAt: null,
+      },
+    });
+
+    const shopifyWrite = await syncApplicationToShopify(admin, application, "approved");
+
+    await db.b2BApplication.update({
+      where: { id },
+      data: {
+        shopifyCustomerId: shopifyWrite.customer?.id || application.shopifyCustomerId || null,
+        shopifyCompanyId: shopifyWrite.company?.companyId || application.shopifyCompanyId || null,
+        shopifyCompanyLocationId:
+          shopifyWrite.company?.companyLocationId || application.shopifyCompanyLocationId || null,
       },
     });
 
@@ -187,964 +176,872 @@ export async function action({ request }: any) {
   return null;
 }
 
-function formatDate(value: string | Date) {
-  return new Date(value).toLocaleString("it-IT", {
-    day: "2-digit",
-    month: "2-digit",
-    year: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
+async function syncApplicationToShopify(admin: any, application: any, status: string) {
+  let tagsToApply = ["b2b_pending_review"];
+
+  if (status === "approved") {
+    tagsToApply = ["b2b_customer", "vat_verified", "b2b_manually_approved"];
+  }
+
+  if (status === "rejected") {
+    tagsToApply = ["b2b_rejected"];
+  }
+
+  const payload = {
+    email: application.email,
+    firstName: application.firstName || "B2B",
+    lastName: application.lastName || "Customer",
+    companyName: application.companyNameSubmitted,
+  };
+
+  const vies = {
+    valid: application.viesValid,
+    companyName: application.viesCompanyName || application.companyNameSubmitted,
+    address: application.viesAddress || "",
+    countryCode: application.viesCountryCode || application.billingCountry || "IT",
+    vatNumber: application.viesVatNumber || application.vatNumberSubmitted,
+  };
+
+  const billingValidation = {
+    billingCountry: application.billingCountry || vies.countryCode || "IT",
+    pec: application.pec || "",
+    codiceDestinatario: application.codiceDestinatario || "",
+  };
+
+  const metafieldsToWrite = {
+    "b2b.pec": billingValidation.pec,
+    "b2b.codice_destinatario": billingValidation.codiceDestinatario,
+    "b2b.vat_number": normalizeVat(application.vatNumberSubmitted),
+    "b2b.vies_company_name": application.viesCompanyName || "",
+    "b2b.vies_address": application.viesAddress || "",
+    "b2b.vies_match_score": String(application.matchScore ?? ""),
+    "b2b.vies_status": application.viesValid ? "valid" : "invalid",
+    "b2b.verified_at": new Date().toISOString(),
+    "b2b.company_name_submitted": application.companyNameSubmitted || "",
+    "b2b.billing_country": application.billingCountry || "",
+  };
+
+  let customer = await findCustomerByEmail(admin, application.email);
+
+  if (!customer) {
+    customer = await createCustomer(admin, payload, tagsToApply);
+  } else {
+    await syncB2BTags(admin, customer.id, customer.tags || [], tagsToApply);
+  }
+
+  const metafields = await setCustomerMetafields(admin, customer.id, metafieldsToWrite);
+
+  let company = null;
+
+  if (status === "approved") {
+    customer = (await findCustomerByEmail(admin, application.email)) || customer;
+
+    company = await createCompanyForApprovedCustomer({
+      admin,
+      customer,
+      payload,
+      vies,
+      billingValidation,
+    });
+  }
+
+  return {
+    customer,
+    metafields,
+    company,
+  };
 }
 
-function statusText(status: string) {
-  if (status === "approved") return "Approvata";
-  if (status === "rejected") return "Rifiutata";
-  return "In revisione";
+async function graphQL(admin: any, query: string, variables: any = {}) {
+  const response = await admin.graphql(query, { variables });
+  return response.json();
 }
 
-function statusTone(status: string): "success" | "danger" | "warning" {
-  if (status === "approved") return "success";
-  if (status === "rejected") return "danger";
-  return "warning";
+async function findCustomerByEmail(admin: any, email: string) {
+  const data = await graphQL(
+    admin,
+    `#graphql
+      query FindCustomerByEmail($query: String!) {
+        customers(first: 1, query: $query) {
+          nodes {
+            id
+            email
+            tags
+            companyContactProfiles {
+              id
+              company {
+                id
+                name
+              }
+            }
+          }
+        }
+      }
+    `,
+    { query: `email:${email}` },
+  );
+
+  return data?.data?.customers?.nodes?.[0] ?? null;
 }
 
-function viesText(app: any) {
-  if (app.viesValid === true) return "VIES valido";
-  if (app.viesValid === false) return "VIES non valido";
-  return "VIES non controllato";
+async function createCustomer(admin: any, payload: any, tagsToApply: string[]) {
+  const data = await graphQL(
+    admin,
+    `#graphql
+      mutation CustomerCreate($input: CustomerInput!) {
+        customerCreate(input: $input) {
+          customer {
+            id
+            email
+            tags
+            companyContactProfiles {
+              id
+              company {
+                id
+                name
+              }
+            }
+          }
+          userErrors {
+            field
+            message
+          }
+        }
+      }
+    `,
+    {
+      input: {
+        email: String(payload.email || "").trim(),
+        firstName: payload.firstName || "B2B",
+        lastName: payload.lastName || "Customer",
+        note: `B2B application manual review - ${payload.companyName || ""}`,
+        tags: tagsToApply,
+      },
+    },
+  );
+
+  const errors = data?.data?.customerCreate?.userErrors ?? [];
+
+  if (errors.length) {
+    throw new Error(errors.map((e: any) => e.message).join(" | "));
+  }
+
+  return data?.data?.customerCreate?.customer;
 }
 
-function viesTone(app: any): "success" | "danger" | "neutral" {
-  if (app.viesValid === true) return "success";
-  if (app.viesValid === false) return "danger";
-  return "neutral";
+async function syncB2BTags(
+  admin: any,
+  customerId: string,
+  existingTags: string[],
+  newTags: string[],
+) {
+  const tagsToRemove = existingTags.filter((tag) =>
+    MANAGED_B2B_TAGS.includes(tag),
+  );
+
+  if (tagsToRemove.length) {
+    const removeData = await graphQL(
+      admin,
+      `#graphql
+        mutation TagsRemove($id: ID!, $tags: [String!]!) {
+          tagsRemove(id: $id, tags: $tags) {
+            userErrors {
+              field
+              message
+            }
+          }
+        }
+      `,
+      {
+        id: customerId,
+        tags: tagsToRemove,
+      },
+    );
+
+    const removeErrors = removeData?.data?.tagsRemove?.userErrors ?? [];
+
+    if (removeErrors.length) {
+      throw new Error(removeErrors.map((e: any) => e.message).join(" | "));
+    }
+  }
+
+  const addData = await graphQL(
+    admin,
+    `#graphql
+      mutation TagsAdd($id: ID!, $tags: [String!]!) {
+        tagsAdd(id: $id, tags: $tags) {
+          userErrors {
+            field
+            message
+          }
+        }
+      }
+    `,
+    {
+      id: customerId,
+      tags: newTags,
+    },
+  );
+
+  const addErrors = addData?.data?.tagsAdd?.userErrors ?? [];
+
+  if (addErrors.length) {
+    throw new Error(addErrors.map((e: any) => e.message).join(" | "));
+  }
 }
 
-function shopifySyncText(app: any) {
-  if (app.shopifyCompanyId) return "Company creata";
-  if (app.shopifyCustomerId) return "Cliente creato";
-  return "Non sincronizzata";
+async function setCustomerMetafields(
+  admin: any,
+  customerId: string,
+  metafieldsToWrite: Record<string, string>,
+) {
+  const metafields = Object.entries(metafieldsToWrite)
+    .filter(([, value]) => String(value ?? "").trim() !== "")
+    .map(([fullKey, value]) => {
+      const [namespace, key] = fullKey.split(".");
+
+      return {
+        ownerId: customerId,
+        namespace,
+        key,
+        type:
+          key === "vies_address"
+            ? "multi_line_text_field"
+            : "single_line_text_field",
+        value: String(value ?? "").trim(),
+      };
+    });
+
+  if (!metafields.length) return [];
+
+  const data = await graphQL(
+    admin,
+    `#graphql
+      mutation MetafieldsSet($metafields: [MetafieldsSetInput!]!) {
+        metafieldsSet(metafields: $metafields) {
+          metafields {
+            id
+            namespace
+            key
+            value
+          }
+          userErrors {
+            field
+            message
+          }
+        }
+      }
+    `,
+    { metafields },
+  );
+
+  const errors = data?.data?.metafieldsSet?.userErrors ?? [];
+
+  if (errors.length) {
+    throw new Error(errors.map((e: any) => e.message).join(" | "));
+  }
+
+  return data?.data?.metafieldsSet?.metafields ?? [];
 }
 
-function Badge({
-  children,
-  tone = "neutral",
+async function updateCustomerTaxExempt(admin: any, customerId: string) {
+  const data = await graphQL(
+    admin,
+    `#graphql
+      mutation CustomerUpdate($input: CustomerInput!) {
+        customerUpdate(input: $input) {
+          customer { id email taxExempt }
+          userErrors { field message }
+        }
+      }
+    `,
+    {
+      input: {
+        id: customerId,
+        taxExempt: true,
+      },
+    },
+  );
+
+  const errors = data?.data?.customerUpdate?.userErrors ?? [];
+  if (errors.length) {
+    throw new Error(errors.map((e: any) => e.message).join(" | "));
+  }
+
+  return data?.data?.customerUpdate?.customer ?? null;
+}
+
+async function createCompanyForApprovedCustomer({
+  admin,
+  customer,
+  payload,
+  vies,
+  billingValidation,
 }: {
-  children: React.ReactNode;
-  tone?: "success" | "danger" | "warning" | "info" | "neutral";
+  admin: any;
+  customer: any;
+  payload: any;
+  vies: any;
+  billingValidation: any;
 }) {
-  return <span className={`zbe-badge zbe-badge--${tone}`}>{children}</span>;
+  const existingCompany =
+    customer?.companyContactProfiles?.[0]?.company ?? null;
+
+  if (existingCompany?.id) {
+    return {
+      skipped: true,
+      reason: "Customer already assigned to a company.",
+      companyId: existingCompany.id,
+      companyName: existingCompany.name,
+    };
+  }
+
+  const companyName =
+    String(vies.companyName || "").trim() ||
+    String(payload.companyName || "").trim();
+
+  if (!companyName) {
+    return {
+      skipped: true,
+      reason: "Missing company name.",
+    };
+  }
+
+  const address1 =
+    String(vies.address || "").split("\n")[0]?.trim() || "Address from VIES";
+
+  const countryCode =
+    billingValidation.billingCountry || vies.countryCode || "IT";
+
+  const taxRegistrationId = normalizeVat(vies.vatNumber || "");
+
+  const companyCreateData = await graphQL(
+    admin,
+    `#graphql
+      mutation CompanyCreate($input: CompanyCreateInput!) {
+        companyCreate(input: $input) {
+          company {
+            id
+            name
+            contactRoles(first: 10) {
+              nodes {
+                id
+                name
+              }
+            }
+            locations(first: 10) {
+              nodes {
+                id
+                name
+              }
+            }
+          }
+          userErrors {
+            field
+            message
+          }
+        }
+      }
+    `,
+    {
+      input: {
+        company: {
+          name: companyName,
+        },
+        companyLocation: {
+          name: companyName,
+          taxRegistrationId,
+          taxExempt: countryCode !== "IT",
+          billingAddress: {
+            recipient: companyName,
+            address1,
+            city: "N/A",
+            countryCode,
+          },
+        },
+      },
+    },
+  );
+
+  const companyErrors =
+    companyCreateData?.data?.companyCreate?.userErrors ?? [];
+
+  if (companyErrors.length) {
+    throw new Error(companyErrors.map((e: any) => e.message).join(" | "));
+  }
+
+  const company = companyCreateData?.data?.companyCreate?.company;
+  const location = company?.locations?.nodes?.[0];
+  const role = company?.contactRoles?.nodes?.[0];
+
+  if (!company?.id || !location?.id || !role?.id) {
+    return {
+      skipped: true,
+      reason: "Company created but location or role missing.",
+      companyId: company?.id,
+      companyName: company?.name,
+    };
+  }
+
+  const assignCustomerData = await graphQL(
+    admin,
+    `#graphql
+      mutation AssignCustomer($companyId: ID!, $customerId: ID!) {
+        companyAssignCustomerAsContact(
+          companyId: $companyId
+          customerId: $customerId
+        ) {
+          companyContact {
+            id
+          }
+          userErrors {
+            field
+            message
+          }
+        }
+      }
+    `,
+    {
+      companyId: company.id,
+      customerId: customer.id,
+    },
+  );
+
+  const assignErrors =
+    assignCustomerData?.data?.companyAssignCustomerAsContact?.userErrors ?? [];
+
+  if (assignErrors.length) {
+    throw new Error(assignErrors.map((e: any) => e.message).join(" | "));
+  }
+
+  const companyContact =
+    assignCustomerData?.data?.companyAssignCustomerAsContact?.companyContact;
+
+  if (!companyContact?.id) {
+    return {
+      skipped: true,
+      reason: "Company contact was not returned.",
+      companyId: company.id,
+      companyName: company.name,
+      companyLocationId: location.id,
+    };
+  }
+
+  const assignRoleData = await graphQL(
+    admin,
+    `#graphql
+      mutation AssignRole(
+        $companyContactId: ID!
+        $companyLocationId: ID!
+        $companyContactRoleId: ID!
+      ) {
+        companyContactAssignRole(
+          companyContactId: $companyContactId
+          companyLocationId: $companyLocationId
+          companyContactRoleId: $companyContactRoleId
+        ) {
+          userErrors {
+            field
+            message
+          }
+        }
+      }
+    `,
+    {
+      companyContactId: companyContact.id,
+      companyLocationId: location.id,
+      companyContactRoleId: role.id,
+    },
+  );
+
+  const roleErrors =
+    assignRoleData?.data?.companyContactAssignRole?.userErrors ?? [];
+
+  if (roleErrors.length) {
+    throw new Error(roleErrors.map((e: any) => e.message).join(" | "));
+  }
+
+  if (countryCode !== "IT") {
+    await updateCustomerTaxExempt(admin, customer.id);
+  }
+
+  return {
+    created: true,
+    companyId: company.id,
+    companyName: company.name,
+    companyLocationId: location.id,
+    companyLocationName: location.name,
+    companyContactId: companyContact.id,
+    companyContactRoleId: role.id,
+    companyContactRoleName: role.name,
+  };
 }
 
-function Read({ label, value }: { label: string; value: React.ReactNode }) {
+function normalizeVat(vatNumber: string) {
+  return String(vatNumber || "")
+    .trim()
+    .replace(/\s+/g, "")
+    .replace(/[.\-_/]/g, "")
+    .toUpperCase();
+}
+
+function statusLabel(status: string) {
+  if (status === "approved") return "✅ Approved";
+  if (status === "rejected") return "❌ Rejected";
+  return "🟡 Pending review";
+}
+
+function statusColor(status: string) {
+  if (status === "approved") return "#dff3df";
+  if (status === "rejected") return "#ffe1dc";
+  return "#fff3cd";
+}
+
+export default function ApplicationsPage() {
+  const { applications } = useLoaderData<typeof loader>();
+  const [openId, setOpenId] = useState<string | null>(null);
+
   return (
-    <div className="zbe-read">
-      <strong>{label}</strong>
+    <div style={{ padding: 24 }}>
+      <h1>B2B Applications</h1>
+
+      <p style={{ marginBottom: 24 }}>
+        Review, edit, approve or reject B2B access requests.
+      </p>
+
+      <div style={bulkActions}>
+        <Form method="post">
+          <button
+            name="intent"
+            value="bulk_reset_to_pending"
+            style={buttonYellow}
+            onClick={(event) => {
+              if (!window.confirm("Rimettere in revisione tutte le richieste approvate/rifiutate?")) {
+                event.preventDefault();
+              }
+            }}
+          >
+            Rimetti approvate/rifiutate in pending
+          </button>
+        </Form>
+
+        <Form method="post">
+          <button
+            name="intent"
+            value="bulk_approve_pending"
+            style={buttonGreen}
+            onClick={(event) => {
+              if (!window.confirm("Approvare tutte le richieste pending e creare/sincronizzare le aziende mancanti?")) {
+                event.preventDefault();
+              }
+            }}
+          >
+            Approva tutti i pending + crea aziende
+          </button>
+        </Form>
+      </div>
+
+      <table style={{ width: "100%", borderCollapse: "collapse", background: "white" }}>
+        <thead>
+          <tr>
+            <th style={th}>Status</th>
+            <th style={th}>Company</th>
+            <th style={th}>VAT</th>
+            <th style={th}>Email</th>
+            <th style={th}>Match</th>
+            <th style={th}>VIES</th>
+            <th style={th}>Created</th>
+            <th style={th}>Action</th>
+          </tr>
+        </thead>
+
+        <tbody>
+          {applications.map((app) => (
+            <tr key={app.id}>
+              <td style={td}>{statusLabel(app.status)}</td>
+              <td style={td}>{app.companyNameSubmitted || "-"}</td>
+              <td style={td}>{app.vatNumberSubmitted}</td>
+              <td style={td}>{app.email}</td>
+              <td style={td}>{app.matchScore ?? "-"}%</td>
+              <td style={td}>{app.viesValid ? "Valid" : "Invalid"}</td>
+              <td style={td}>{new Date(app.createdAt).toLocaleString()}</td>
+              <td style={td}>
+                <button
+                  type="button"
+                  style={buttonDark}
+                  onClick={() => setOpenId(openId === app.id ? null : app.id)}
+                >
+                  {openId === app.id ? "Close" : "Open"}
+                </button>
+              </td>
+            </tr>
+          ))}
+
+          {!applications.length && (
+            <tr>
+              <td style={td} colSpan={8}>
+                No B2B applications yet.
+              </td>
+            </tr>
+          )}
+        </tbody>
+      </table>
+
+      {applications.map((app) =>
+        openId === app.id ? (
+          <div key={`${app.id}-detail`} style={detailBox}>
+            <Form method="post">
+              <input type="hidden" name="id" value={app.id} />
+
+              <div style={statusPill(app.status)}>{statusLabel(app.status)}</div>
+
+              <div style={grid}>
+                <section style={card}>
+                  <h2>Submitted data</h2>
+
+                  <Field label="Company name">
+                    <input
+                      name="companyNameSubmitted"
+                      defaultValue={app.companyNameSubmitted || ""}
+                      style={input}
+                    />
+                  </Field>
+
+                  <Field label="VAT number">
+                    <input
+                      name="vatNumberSubmitted"
+                      defaultValue={app.vatNumberSubmitted || ""}
+                      style={input}
+                    />
+                  </Field>
+
+                  <Field label="Email">
+                    <input name="email" defaultValue={app.email || ""} style={input} />
+                  </Field>
+
+                  <Field label="First name">
+                    <input
+                      name="firstName"
+                      defaultValue={app.firstName || ""}
+                      style={input}
+                    />
+                  </Field>
+
+                  <Field label="Last name">
+                    <input
+                      name="lastName"
+                      defaultValue={app.lastName || ""}
+                      style={input}
+                    />
+                  </Field>
+
+                  <Field label="Billing country">
+                    <input
+                      name="billingCountry"
+                      defaultValue={app.billingCountry || ""}
+                      style={input}
+                    />
+                  </Field>
+
+                  <Field label="PEC">
+                    <input name="pec" defaultValue={app.pec || ""} style={input} />
+                  </Field>
+
+                  <Field label="Codice destinatario">
+                    <input
+                      name="codiceDestinatario"
+                      defaultValue={app.codiceDestinatario || ""}
+                      style={input}
+                    />
+                  </Field>
+                </section>
+
+                <section style={card}>
+                  <h2>VIES data</h2>
+
+                  <Read label="VIES valid" value={app.viesValid ? "✅ Valid" : "❌ Invalid"} />
+                  <Read label="VIES company" value={app.viesCompanyName || "-"} />
+                  <Read label="VIES VAT" value={app.viesVatNumber || "-"} />
+                  <Read label="VIES country" value={app.viesCountryCode || "-"} />
+
+                  <div style={{ marginTop: 12 }}>
+                    <strong>VIES address</strong>
+                    <pre style={pre}>{app.viesAddress || "-"}</pre>
+                  </div>
+
+                  <Read label="Match score" value={`${app.matchScore ?? "-"}%`} />
+                </section>
+              </div>
+
+              <section style={{ ...card, marginTop: 16 }}>
+                <h2>Shopify sync</h2>
+                <Read label="Customer ID" value={app.shopifyCustomerId || "-"} />
+                <Read label="Company ID" value={app.shopifyCompanyId || "-"} />
+                <Read
+                  label="Company location ID"
+                  value={app.shopifyCompanyLocationId || "-"}
+                />
+              </section>
+
+              <section style={{ ...card, marginTop: 16 }}>
+                <h2>Review notes</h2>
+
+                <textarea
+                  name="reviewNotes"
+                  defaultValue={app.reviewNotes || ""}
+                  rows={4}
+                  style={{ ...input, minHeight: 100, borderRadius: 14, paddingTop: 12 }}
+                />
+
+                <div style={actions}>
+                  <button name="intent" value="save" style={buttonGrey}>
+                    Save edits
+                  </button>
+
+                  <button name="intent" value="approve" style={buttonGreen}>
+                    Approve + create company
+                  </button>
+
+                  <button name="intent" value="pending" style={buttonYellow}>
+                    Pending
+                  </button>
+
+                  <button name="intent" value="reject" style={buttonRed}>
+                    Reject
+                  </button>
+                </div>
+              </section>
+            </Form>
+          </div>
+        ) : null,
+      )}
+    </div>
+  );
+}
+
+function Field({ label, children }: any) {
+  return (
+    <label style={{ display: "block", marginBottom: 12 }}>
+      <strong style={{ display: "block", marginBottom: 5 }}>{label}</strong>
+      {children}
+    </label>
+  );
+}
+
+function Read({ label, value }: any) {
+  return (
+    <div style={{ marginBottom: 12 }}>
+      <strong style={{ display: "block", marginBottom: 5 }}>{label}</strong>
       <div>{value}</div>
     </div>
   );
 }
 
-function Stat({
-  label,
-  value,
-  tone,
-}: {
-  label: string;
-  value: number;
-  tone?: "success" | "warning" | "danger";
-}) {
-  return (
-    <div className="zbe-stat">
-      <div className={`zbe-stat-value ${tone ? `zbe-stat-value--${tone}` : ""}`}>
-        {value}
-      </div>
-      <div className="zbe-stat-label">{label}</div>
-    </div>
-  );
+const th: CSSProperties = {
+  textAlign: "left",
+  padding: 12,
+  borderBottom: "1px solid #ddd",
+};
+
+const td: CSSProperties = {
+  padding: 12,
+  borderBottom: "1px solid #eee",
+};
+
+const detailBox: CSSProperties = {
+  padding: 20,
+  background: "#f6f6f6",
+  borderBottom: "1px solid #ddd",
+};
+
+const grid: CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "1fr 1fr",
+  gap: 16,
+};
+
+const card: CSSProperties = {
+  background: "white",
+  border: "1px solid #e5e5e5",
+  borderRadius: 16,
+  padding: 18,
+};
+
+const input: CSSProperties = {
+  width: "100%",
+  minHeight: 42,
+  border: "1px solid #ddd",
+  borderRadius: 999,
+  padding: "0 14px",
+};
+
+const pre: CSSProperties = {
+  whiteSpace: "pre-wrap",
+  background: "#f7f7f7",
+  padding: 12,
+  borderRadius: 12,
+};
+
+const bulkActions: CSSProperties = {
+  display: "flex",
+  gap: 10,
+  flexWrap: "wrap",
+  marginBottom: 20,
+};
+
+const actions: CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "repeat(4, 1fr)",
+  gap: 10,
+  marginTop: 16,
+};
+
+const buttonBase: CSSProperties = {
+  minHeight: 42,
+  border: 0,
+  borderRadius: 999,
+  fontWeight: 800,
+  cursor: "pointer",
+};
+
+const buttonDark: CSSProperties = {
+  ...buttonBase,
+  background: "#303a21",
+  color: "white",
+  padding: "0 16px",
+};
+
+const buttonGrey: CSSProperties = {
+  ...buttonBase,
+  background: "#ddd",
+  color: "#222",
+};
+
+const buttonGreen: CSSProperties = {
+  ...buttonBase,
+  background: "#1f7a35",
+  color: "white",
+};
+
+const buttonYellow: CSSProperties = {
+  ...buttonBase,
+  background: "#c9902f",
+  color: "white",
+};
+
+const buttonRed: CSSProperties = {
+  ...buttonBase,
+  background: "#9f2f1f",
+  color: "white",
+};
+
+function statusPill(status: string): CSSProperties {
+  return {
+    display: "inline-block",
+    background: statusColor(status),
+    padding: "7px 12px",
+    borderRadius: 999,
+    fontWeight: 800,
+    marginBottom: 16,
+  };
 }
-
-export default function ApplicationsPage() {
-  const { applications, stats } = useLoaderData<typeof loader>();
-  const [openId, setOpenId] = useState<string | null>(null);
-  const [query, setQuery] = useState("");
-  const [statusFilter, setStatusFilter] = useState("all");
-
-  const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase();
-
-    return applications.filter((app) => {
-      const matchesStatus = statusFilter === "all" || app.status === statusFilter;
-      const haystack = [
-        app.companyNameSubmitted,
-        app.vatNumberSubmitted,
-        app.email,
-        app.viesCompanyName,
-        app.billingCountry,
-        app.pec,
-        app.codiceDestinatario,
-        app.shopifyCompanyId,
-      ]
-        .filter(Boolean)
-        .join(" ")
-        .toLowerCase();
-
-      return matchesStatus && (!q || haystack.includes(q));
-    });
-  }, [applications, query, statusFilter]);
-
-  return (
-    <div className="zbe-page">
-      <style>{styles}</style>
-
-      <section className="zbe-hero">
-        <div>
-          <div className="zbe-eyebrow">Zig Business Engine</div>
-          <h1>Richieste B2B</h1>
-          <p>
-            Controlla accessi, VIES, dati fiscali e sincronizzazione Shopify.
-          </p>
-        </div>
-        <div className="zbe-hero-icon">👥</div>
-      </section>
-
-      <section className="zbe-stats">
-        <Stat label="Totali" value={stats.total} />
-        <Stat label="In revisione" value={stats.pending} tone="warning" />
-        <Stat label="Approvate" value={stats.approved} tone="success" />
-        <Stat label="Rifiutate" value={stats.rejected} tone="danger" />
-      </section>
-
-      {(stats.pending > 0 || stats.rejected > 0 || stats.pendingSynced > 0) && (
-        <section className="zbe-bulk-box">
-          <div>
-            <strong>Azioni massive</strong>
-            <p>
-              Approva in blocco le richieste B2B in revisione o rifiutate. Questa azione aggiorna lo stato nell'app senza ricreare clienti o company Shopify.
-            </p>
-          </div>
-
-          <div className="zbe-bulk-actions">
-            {stats.pending > 0 && (
-              <Form method="post">
-                <input type="hidden" name="intent" value="bulk_approve_pending" />
-                <button
-                  className="zbe-button zbe-button--green"
-                  type="submit"
-                  onClick={(event) => {
-                    if (!window.confirm(`Approvare manualmente tutte le ${stats.pending} richieste in revisione?`)) {
-                      event.preventDefault();
-                    }
-                  }}
-                >
-                  Approva tutti i pending
-                </button>
-              </Form>
-            )}
-
-            {stats.rejected > 0 && (
-              <Form method="post">
-                <input type="hidden" name="intent" value="bulk_approve_rejected" />
-                <button
-                  className="zbe-button zbe-button--green"
-                  type="submit"
-                  onClick={(event) => {
-                    if (!window.confirm(`Approvare manualmente tutte le ${stats.rejected} richieste rifiutate?`)) {
-                      event.preventDefault();
-                    }
-                  }}
-                >
-                  Approva tutte le rifiutate
-                </button>
-              </Form>
-            )}
-
-            {stats.pendingSynced > 0 && (
-              <Form method="post">
-                <input type="hidden" name="intent" value="bulk_approve_synced_pending" />
-                <button
-                  className="zbe-button zbe-button--outline"
-                  type="submit"
-                  onClick={(event) => {
-                    if (!window.confirm(`Approvare ${stats.pendingSynced} richieste pending già sincronizzate?`)) {
-                      event.preventDefault();
-                    }
-                  }}
-                >
-                  Approva solo sincronizzate
-                </button>
-              </Form>
-            )}
-          </div>
-        </section>
-      )}
-
-      <section className="zbe-toolbar">
-        <input
-          value={query}
-          onChange={(event) => setQuery(event.target.value)}
-          placeholder="Cerca azienda, VAT, email..."
-        />
-
-        <select
-          value={statusFilter}
-          onChange={(event) => setStatusFilter(event.target.value)}
-        >
-          <option value="all">Tutti gli stati</option>
-          <option value="pending_review">In revisione</option>
-          <option value="approved">Approvate</option>
-          <option value="rejected">Rifiutate</option>
-        </select>
-      </section>
-
-      <section className="zbe-list">
-        {filtered.map((app) => {
-          const isOpen = openId === app.id;
-          const canApproveStatusOnly = app.status !== "approved";
-
-          return (
-            <article key={app.id} className="zbe-request">
-              <div className="zbe-summary">
-                <div className="zbe-summary-main">
-                  <div className="zbe-badges">
-                    <Badge tone={statusTone(app.status)}>{statusText(app.status)}</Badge>
-                    <Badge tone={viesTone(app)}>{viesText(app)}</Badge>
-                    {app.shopifyCompanyId && <Badge tone="info">Company creata</Badge>}
-                  </div>
-
-                  <strong className="zbe-company">
-                    {app.companyNameSubmitted || "Azienda senza nome"}
-                  </strong>
-
-                  <div className="zbe-mobile-meta">
-                    {app.vatNumberSubmitted || "VAT mancante"} ·{" "}
-                    {app.email || "Email mancante"}
-                  </div>
-                </div>
-
-                <div className="zbe-summary-cell">
-                  <span>Azienda / VAT</span>
-                  <strong>{app.companyNameSubmitted || "-"}</strong>
-                  <small>{app.vatNumberSubmitted || "VAT mancante"}</small>
-                </div>
-
-                <div className="zbe-summary-cell">
-                  <span>Contatto</span>
-                  <strong>{app.email || "-"}</strong>
-                  <small>{app.billingCountry || "Paese non indicato"}</small>
-                </div>
-
-                <div className="zbe-summary-cell">
-                  <span>Controllo</span>
-                  <strong>
-                    {app.matchScore === null || app.matchScore === undefined
-                      ? "Match —"
-                      : `Match ${app.matchScore}%`}
-                  </strong>
-                  <small>{shopifySyncText(app)}</small>
-                </div>
-
-                <div className="zbe-summary-cell">
-                  <span>Data</span>
-                  <strong>{formatDate(app.createdAt)}</strong>
-                  <small>Agg. {formatDate(app.updatedAt)}</small>
-                </div>
-
-                <button
-                  type="button"
-                  className="zbe-button zbe-button--dark"
-                  onClick={() => setOpenId(isOpen ? null : app.id)}
-                >
-                  {isOpen ? "Chiudi" : "Apri"}
-                </button>
-              </div>
-
-              {isOpen && (
-                <div className="zbe-detail">
-                  <div className="zbe-detail-grid">
-                    <section className="zbe-card">
-                      <h2>Richiesta</h2>
-                      <Read label="Azienda inserita" value={app.companyNameSubmitted || "-"} />
-                      <Read label="Email" value={app.email || "-"} />
-                      <Read label="Nome" value={app.firstName || "-"} />
-                      <Read label="Cognome" value={app.lastName || "-"} />
-                    </section>
-
-                    <section className="zbe-card">
-                      <h2>Dati fiscali</h2>
-                      <Read label="Partita IVA / VAT" value={app.vatNumberSubmitted || "-"} />
-                      <Read label="Paese" value={app.billingCountry || "-"} />
-                      <Read label="PEC" value={app.pec || "-"} />
-                      <Read
-                        label="Codice destinatario / SDI"
-                        value={app.codiceDestinatario || "-"}
-                      />
-                    </section>
-
-                    <section className="zbe-card">
-                      <h2>VIES</h2>
-                      <Read
-                        label="Validità"
-                        value={
-                          app.viesValid
-                            ? "Valido"
-                            : app.viesValid === false
-                              ? "Non valido"
-                              : "-"
-                        }
-                      />
-                      <Read label="Azienda VIES" value={app.viesCompanyName || "-"} />
-                      <Read label="Paese VIES" value={app.viesCountryCode || "-"} />
-                      <Read label="VAT VIES" value={app.viesVatNumber || "-"} />
-                      <Read
-                        label="Match"
-                        value={
-                          app.matchScore === null || app.matchScore === undefined
-                            ? "-"
-                            : `${app.matchScore}%`
-                        }
-                      />
-                      <Read
-                        label="Indirizzo VIES"
-                        value={<pre className="zbe-pre">{app.viesAddress || "-"}</pre>}
-                      />
-                    </section>
-
-                    <section className="zbe-card">
-                      <h2>Shopify</h2>
-                      <Read label="Customer ID" value={app.shopifyCustomerId || "Non creato"} />
-                      <Read label="Company ID" value={app.shopifyCompanyId || "Non creata"} />
-                      <Read
-                        label="Location ID"
-                        value={app.shopifyCompanyLocationId || "Non creata"}
-                      />
-                      <Read label="Note revisione" value={app.reviewNotes || "-"} />
-                    </section>
-                  </div>
-
-                  <section className="zbe-edit-card">
-                    <div className="zbe-edit-head">
-                      <div>
-                        <h2>Modifica richiesta</h2>
-                        <p>
-                          Corregge i dati salvati nell'app. Non modifica automaticamente customer/company Shopify già creati.
-                        </p>
-                      </div>
-                    </div>
-
-                    <Form method="post" className="zbe-edit-form">
-                      <input type="hidden" name="id" value={app.id} />
-                      <input type="hidden" name="intent" value="save_edits" />
-
-                      <label>
-                        Azienda inserita
-                        <input name="companyNameSubmitted" defaultValue={app.companyNameSubmitted || ""} />
-                      </label>
-
-                      <label>
-                        Email
-                        <input name="email" type="email" defaultValue={app.email || ""} />
-                      </label>
-
-                      <label>
-                        Nome
-                        <input name="firstName" defaultValue={app.firstName || ""} />
-                      </label>
-
-                      <label>
-                        Cognome
-                        <input name="lastName" defaultValue={app.lastName || ""} />
-                      </label>
-
-                      <label>
-                        Partita IVA / VAT
-                        <input name="vatNumberSubmitted" defaultValue={app.vatNumberSubmitted || ""} />
-                      </label>
-
-                      <label>
-                        Paese fatturazione
-                        <input name="billingCountry" maxLength={2} defaultValue={app.billingCountry || ""} />
-                      </label>
-
-                      <label>
-                        PEC
-                        <input name="pec" defaultValue={app.pec || ""} />
-                      </label>
-
-                      <label>
-                        Codice destinatario / SDI
-                        <input name="codiceDestinatario" defaultValue={app.codiceDestinatario || ""} />
-                      </label>
-
-                      <label>
-                        Validità VIES
-                        <select
-                          name="viesValid"
-                          defaultValue={
-                            app.viesValid === true
-                              ? "true"
-                              : app.viesValid === false
-                                ? "false"
-                                : ""
-                          }
-                        >
-                          <option value="">Non controllato</option>
-                          <option value="true">Valido</option>
-                          <option value="false">Non valido</option>
-                        </select>
-                      </label>
-
-                      <label>
-                        Azienda VIES
-                        <input name="viesCompanyName" defaultValue={app.viesCompanyName || ""} />
-                      </label>
-
-                      <label>
-                        Paese VIES
-                        <input name="viesCountryCode" maxLength={2} defaultValue={app.viesCountryCode || ""} />
-                      </label>
-
-                      <label>
-                        VAT VIES
-                        <input name="viesVatNumber" defaultValue={app.viesVatNumber || ""} />
-                      </label>
-
-                      <label>
-                        Match %
-                        <input
-                          name="matchScore"
-                          type="number"
-                          min="0"
-                          max="100"
-                          defaultValue={
-                            app.matchScore === null || app.matchScore === undefined
-                              ? ""
-                              : app.matchScore
-                          }
-                        />
-                      </label>
-
-                      <label>
-                        Customer ID Shopify
-                        <input name="shopifyCustomerId" defaultValue={app.shopifyCustomerId || ""} />
-                      </label>
-
-                      <label>
-                        Company ID Shopify
-                        <input name="shopifyCompanyId" defaultValue={app.shopifyCompanyId || ""} />
-                      </label>
-
-                      <label>
-                        Location ID Shopify
-                        <input name="shopifyCompanyLocationId" defaultValue={app.shopifyCompanyLocationId || ""} />
-                      </label>
-
-                      <label className="zbe-edit-wide">
-                        Indirizzo VIES
-                        <textarea name="viesAddress" defaultValue={app.viesAddress || ""} />
-                      </label>
-
-                      <label className="zbe-edit-wide">
-                        Note revisione
-                        <textarea name="reviewNotes" defaultValue={app.reviewNotes || ""} />
-                      </label>
-
-                      <div className="zbe-edit-submit zbe-edit-wide">
-                        <button className="zbe-button zbe-button--green" type="submit">
-                          Salva modifiche
-                        </button>
-                      </div>
-                    </Form>
-                  </section>
-
-                  <section className="zbe-actions">
-                    {canApproveStatusOnly && (
-                      <Form method="post">
-                        <input type="hidden" name="id" value={app.id} />
-                        <button
-                          className="zbe-button zbe-button--green"
-                          name="intent"
-                          value="approve_status_only"
-                          type="submit"
-                        >
-                          Approva manualmente
-                        </button>
-                      </Form>
-                    )}
-
-                    {app.status !== "pending_review" && (
-                      <Form method="post">
-                        <input type="hidden" name="id" value={app.id} />
-                        <button
-                          className="zbe-button zbe-button--yellow"
-                          name="intent"
-                          value="pending"
-                          type="submit"
-                        >
-                          Rimetti in revisione
-                        </button>
-                      </Form>
-                    )}
-
-                    {app.status !== "rejected" && (
-                      <Form method="post">
-                        <input type="hidden" name="id" value={app.id} />
-                        <button
-                          className="zbe-button zbe-button--red"
-                          name="intent"
-                          value="reject"
-                          type="submit"
-                        >
-                          Rifiuta
-                        </button>
-                      </Form>
-                    )}
-
-                    <Form method="post">
-                      <input type="hidden" name="id" value={app.id} />
-                      <button
-                        className="zbe-button zbe-button--outline-red"
-                        name="intent"
-                        value="delete"
-                        type="submit"
-                        onClick={(event) => {
-                          if (
-                            !window.confirm(
-                              "Eliminare definitivamente questa richiesta?",
-                            )
-                          ) {
-                            event.preventDefault();
-                          }
-                        }}
-                      >
-                        Elimina test
-                      </button>
-                    </Form>
-                  </section>
-                </div>
-              )}
-            </article>
-          );
-        })}
-
-        {!filtered.length && (
-          <div className="zbe-empty">Nessuna richiesta B2B trovata.</div>
-        )}
-      </section>
-    </div>
-  );
-}
-
-const styles = `
-.zbe-page {
-  padding: 24px;
-  background: #f5f1df;
-  min-height: 100vh;
-  color: #253018;
-}
-
-.zbe-hero {
-  display: flex;
-  justify-content: space-between;
-  gap: 24px;
-  align-items: center;
-  background: linear-gradient(135deg, #aec58b 0%, #f5f1df 68%, #ffd44d 100%);
-  border-radius: 34px;
-  padding: 34px;
-  box-shadow: 0 18px 45px rgba(57,65,34,.12);
-}
-
-.zbe-eyebrow {
-  text-transform: uppercase;
-  letter-spacing: .08em;
-  font-size: 13px;
-  font-weight: 900;
-  color: #6f873d;
-  margin-bottom: 10px;
-}
-
-.zbe-hero h1 {
-  margin: 0;
-  font-size: clamp(42px, 6vw, 72px);
-  line-height: .92;
-  font-weight: 950;
-}
-
-.zbe-hero p {
-  max-width: 760px;
-  font-size: 18px;
-  line-height: 1.45;
-  margin-top: 18px;
-}
-
-.zbe-hero-icon {
-  font-size: 72px;
-  background: rgba(248,243,223,.78);
-  width: 150px;
-  height: 150px;
-  border-radius: 34px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.zbe-stats {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 12px;
-  margin-top: 20px;
-}
-
-.zbe-stat {
-  background: white;
-  border-radius: 22px;
-  padding: 18px;
-  box-shadow: 0 12px 30px rgba(57,65,34,.08);
-}
-
-.zbe-stat-value {
-  font-size: 34px;
-  font-weight: 950;
-  line-height: 1;
-  color: #394122;
-}
-
-.zbe-stat-value--success { color: #1f7a35; }
-.zbe-stat-value--warning { color: #b7791f; }
-.zbe-stat-value--danger { color: #9f2f1f; }
-
-.zbe-stat-label {
-  margin-top: 8px;
-  font-weight: 800;
-  color: rgba(37,48,24,.70);
-}
-
-.zbe-bulk-box {
-  margin-top: 18px;
-  background: #fff7dc;
-  border: 1px solid #ffd36a;
-  border-radius: 22px;
-  padding: 18px;
-  display: flex;
-  justify-content: space-between;
-  gap: 18px;
-  align-items: center;
-}
-
-.zbe-bulk-box p {
-  margin: 6px 0 0;
-  color: rgba(37,48,24,.70);
-}
-
-.zbe-toolbar {
-  display: grid;
-  grid-template-columns: 1fr 220px;
-  gap: 12px;
-  margin-top: 20px;
-}
-
-.zbe-toolbar input,
-.zbe-toolbar select {
-  min-height: 48px;
-  border: 1px solid rgba(57,65,34,.18);
-  border-radius: 999px;
-  padding: 0 18px;
-  font-size: 15px;
-  background: white;
-}
-
-.zbe-list {
-  display: grid;
-  gap: 12px;
-  margin-top: 18px;
-}
-
-.zbe-request {
-  background: white;
-  border-radius: 24px;
-  box-shadow: 0 12px 30px rgba(57,65,34,.08);
-  overflow: hidden;
-}
-
-.zbe-summary {
-  display: grid;
-  grid-template-columns: 250px 1.2fr 1.1fr 1fr 1fr auto;
-  gap: 14px;
-  align-items: center;
-  padding: 18px;
-}
-
-.zbe-summary-main {
-  display: none;
-}
-
-.zbe-badges {
-  display: flex;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-
-.zbe-badge {
-  display: inline-flex;
-  border-radius: 999px;
-  padding: 7px 11px;
-  font-weight: 900;
-  font-size: 13px;
-  white-space: nowrap;
-}
-
-.zbe-badge--success { background: #dff3df; color: #1f5f2f; }
-.zbe-badge--danger { background: #ffe1dc; color: #8a2b1b; }
-.zbe-badge--warning { background: #fff3cd; color: #7a4b00; }
-.zbe-badge--info { background: #e5f0ff; color: #234f9d; }
-.zbe-badge--neutral { background: rgba(57,65,34,.08); color: #394122; }
-
-.zbe-company {
-  display: block;
-  font-size: 18px;
-  margin-top: 10px;
-}
-
-.zbe-mobile-meta {
-  color: rgba(37,48,24,.62);
-  font-size: 13px;
-  margin-top: 4px;
-}
-
-.zbe-summary-cell span {
-  display: block;
-  color: rgba(37,48,24,.55);
-  font-size: 12px;
-  font-weight: 900;
-  text-transform: uppercase;
-  letter-spacing: .04em;
-  margin-bottom: 4px;
-}
-
-.zbe-summary-cell strong {
-  display: block;
-  overflow-wrap: anywhere;
-}
-
-.zbe-summary-cell small {
-  display: block;
-  color: rgba(37,48,24,.62);
-  font-size: 13px;
-  margin-top: 4px;
-  overflow-wrap: anywhere;
-}
-
-.zbe-button {
-  min-height: 42px;
-  border: 0;
-  border-radius: 999px;
-  padding: 0 18px;
-  font-weight: 900;
-  cursor: pointer;
-  white-space: nowrap;
-}
-
-.zbe-button--dark { background: #303a21; color: white; }
-.zbe-button--green { background: #1f7a35; color: white; }
-.zbe-button--yellow { background: #f5c24b; color: #302100; }
-.zbe-button--red { background: #9f2f1f; color: white; }
-.zbe-button--outline-red {
-  background: white;
-  color: #9f2f1f;
-  border: 1px solid #f0b8ad;
-}
-
-.zbe-detail {
-  padding: 18px;
-  background: #f7f2df;
-  border-top: 1px solid #efe4bd;
-}
-
-.zbe-detail-grid {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 14px;
-}
-
-.zbe-card {
-  background: white;
-  border: 1px solid #efe4bd;
-  border-radius: 18px;
-  padding: 16px;
-}
-
-.zbe-card h2 {
-  margin-top: 0;
-  margin-bottom: 16px;
-}
-
-.zbe-read {
-  margin-bottom: 12px;
-}
-
-.zbe-read strong {
-  display: block;
-  margin-bottom: 4px;
-}
-
-.zbe-read div {
-  overflow-wrap: anywhere;
-}
-
-.zbe-pre {
-  white-space: pre-wrap;
-  background: #f7f7f7;
-  padding: 12px;
-  border-radius: 12px;
-  margin: 0;
-}
-
-
-.zbe-edit-card {
-  margin-top: 18px;
-  background: #fffdf5;
-  border: 1px solid rgba(57,65,34,.14);
-  border-radius: 22px;
-  padding: 18px;
-}
-
-.zbe-edit-head h2 {
-  margin: 0;
-  font-size: 24px;
-}
-
-.zbe-edit-head p {
-  margin: 6px 0 0;
-  color: rgba(37,48,24,.68);
-  line-height: 1.35;
-}
-
-.zbe-edit-form {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 12px;
-  margin-top: 16px;
-}
-
-.zbe-edit-form label {
-  display: grid;
-  gap: 6px;
-  font-weight: 900;
-  font-size: 13px;
-  color: rgba(37,48,24,.82);
-}
-
-.zbe-edit-form input,
-.zbe-edit-form select,
-.zbe-edit-form textarea {
-  width: 100%;
-  border: 1px solid rgba(57,65,34,.18);
-  border-radius: 14px;
-  padding: 11px 12px;
-  background: white;
-  color: #253018;
-  font: inherit;
-  font-weight: 600;
-}
-
-.zbe-edit-form textarea {
-  min-height: 86px;
-  resize: vertical;
-}
-
-.zbe-edit-wide {
-  grid-column: 1 / -1;
-}
-
-.zbe-edit-submit {
-  display: flex;
-  justify-content: flex-end;
-}
-
-.zbe-actions {
-  margin-top: 16px;
-  background: white;
-  border: 1px solid #efe4bd;
-  border-radius: 18px;
-  padding: 16px;
-  display: flex;
-  gap: 10px;
-  flex-wrap: wrap;
-}
-
-.zbe-empty {
-  background: white;
-  border-radius: 24px;
-  padding: 28px;
-  text-align: center;
-  color: rgba(37,48,24,.7);
-}
-
-@media (max-width: 980px) {
-  .zbe-page {
-    padding: 14px;
-  }
-
-  .zbe-hero {
-    padding: 22px;
-    border-radius: 26px;
-  }
-
-  .zbe-hero-icon {
-    display: none;
-  }
-
-  .zbe-stats {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .zbe-bulk-box {
-    align-items: stretch;
-    flex-direction: column;
-  }
-
-  .zbe-toolbar {
-    grid-template-columns: 1fr;
-  }
-
-  .zbe-summary {
-    display: grid;
-    grid-template-columns: 1fr;
-    gap: 12px;
-  }
-
-  .zbe-summary-main {
-    display: block;
-  }
-
-  .zbe-summary-cell {
-    display: none;
-  }
-
-  .zbe-button {
-    width: 100%;
-  }
-
-  .zbe-detail-grid {
-    grid-template-columns: 1fr;
-  }
-
-  .zbe-actions {
-    display: grid;
-    grid-template-columns: 1fr;
-  }
-}
-
-@media (max-width: 980px) {
-  .zbe-edit-form {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-}
-
-@media (max-width: 640px) {
-  .zbe-edit-form {
-    grid-template-columns: 1fr;
-  }
-}
-`
