@@ -2,113 +2,11 @@ import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import db from "../db.server";
 import { unauthenticated } from "../shopify.server";
 import soap from "soap";
-import {
-  normalizeCountry,
-  normalizeVat,
-  shouldApplyReverseCharge,
-} from "../lib/vies.server";
 
 const DEFAULT_SHOP = "zig-italia-frutta-secca-e-semi.myshopify.com";
 const SHOP_COUNTRY = "IT";
-const VIES_NAME_UNAVAILABLE_COUNTRIES = ["DE"];
 const VIES_WSDL = "https://ec.europa.eu/taxation_customs/vies/checkVatService.wsdl";
-const ENABLE_VIES_CHECK = (process.env.ENABLE_VIES_CHECK || "true") === "true";
-const EU_COUNTRIES = new Set([
-  "AT", "BE", "BG", "CY", "CZ", "DE", "DK", "EE", "EL", "ES",
-  "FI", "FR", "HR", "HU", "IE", "IT", "LT", "LU", "LV", "MT",
-  "NL", "PL", "PT", "RO", "SE", "SI", "SK",
-]);
-
-function clean(value: any) {
-  return String(value || "").trim();
-}
-
-function cleanUpper(value: any) {
-  return clean(value).toUpperCase();
-}
-
-function normalizeVatForVies(countryCode: string, vatNumber: string) {
-  const country = cleanUpper(countryCode);
-  let vat = cleanUpper(vatNumber).replace(/[\s.\-_/]/g, "");
-
-  if (country && vat.startsWith(country)) {
-    vat = vat.slice(country.length);
-  }
-
-  if (country === "AT" && /^\d{8}$/.test(vat)) {
-    vat = `U${vat}`;
-  }
-
-  return { countryCode: country, vatNumber: vat };
-}
-
-function classifyViesSoapError(error: any) {
-  const message = String(error?.message || error || "");
-  const raw = JSON.stringify(error || {});
-  const combined = `${message} ${raw}`.toUpperCase();
-
-  if (combined.includes("MS_UNAVAILABLE")) return "MS_UNAVAILABLE";
-  if (combined.includes("SERVICE_UNAVAILABLE")) return "SERVICE_UNAVAILABLE";
-  if (combined.includes("TIMEOUT") || combined.includes("ETIMEDOUT")) return "TIMEOUT";
-  if (combined.includes("INVALID_INPUT")) return "INVALID_INPUT";
-
-  return "VIES_TECHNICAL_ERROR";
-}
-
-async function checkViesSoap(countryCode: string, vatNumber: string) {
-  const normalized = normalizeVatForVies(countryCode, vatNumber);
-
-  if (!normalized.countryCode || !normalized.vatNumber) {
-    throw new Error("Paese e partita IVA sono obbligatori.");
-  }
-
-  console.log("[Invoice Request] VIES SOAP request", {
-    countryCode: normalized.countryCode,
-    vatNumber: normalized.vatNumber,
-  });
-
-  try {
-    const client = await soap.createClientAsync(VIES_WSDL);
-    const [result] = await client.checkVatAsync({
-      countryCode: normalized.countryCode,
-      vatNumber: normalized.vatNumber,
-    });
-
-    const response = {
-      valid: result?.valid === true || String(result?.valid).toLowerCase() === "true",
-      unavailable: false,
-      countryCode: normalized.countryCode,
-      vatNumber: `${normalized.countryCode}${normalized.vatNumber}`,
-      vatNumberWithoutCountry: normalized.vatNumber,
-      companyName: cleanViesText(result?.name || ""),
-      address: cleanViesText(result?.address || ""),
-      requestDate: result?.requestDate || "",
-      raw: result || null,
-    };
-
-    console.log("[Invoice Request] VIES SOAP response", response);
-
-    return response;
-  } catch (error: any) {
-    const errorCode = classifyViesSoapError(error);
-    const response = {
-      valid: null,
-      unavailable: true,
-      errorCode,
-      errorMessage: error?.message || String(error || ""),
-      countryCode: normalized.countryCode,
-      vatNumber: `${normalized.countryCode}${normalized.vatNumber}`,
-      vatNumberWithoutCountry: normalized.vatNumber,
-      companyName: "",
-      address: "",
-      raw: null,
-    };
-
-    console.error("[Invoice Request] VIES SOAP unavailable", response);
-
-    return response;
-  }
-}
+const VIES_NAME_UNAVAILABLE_COUNTRIES = ["DE", "ES"];
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -129,6 +27,95 @@ function json(data: any, init: ResponseInit = {}) {
 async function graphQL(admin: any, query: string, variables: any = {}) {
   const response = await admin.graphql(query, { variables });
   return response.json();
+}
+
+function normalizeCountry(country: string) {
+  const value = String(country || "").trim().toUpperCase();
+  if (["IT", "ITA", "ITALIA", "ITALY"].includes(value)) return "IT";
+  return value;
+}
+
+function normalizeVat(vatNumber: string) {
+  return String(vatNumber || "")
+    .trim()
+    .replace(/\s+/g, "")
+    .replace(/[.\-_/]/g, "")
+    .toUpperCase();
+}
+
+function cleanViesValue(value: string) {
+  const text = String(value || "").trim();
+  if (!text || text === "---" || text === "--" || text === "-") return "";
+  return text;
+}
+
+function normalizeVatForCountry(vatNumber: string, billingCountry?: string) {
+  let raw = normalizeVat(vatNumber);
+  const country = normalizeCountry(billingCountry || "");
+
+  if (!raw) return raw;
+
+  const hasCountryPrefix = /^[A-Z]{2}/.test(raw);
+
+  if (!hasCountryPrefix && country) {
+    raw = `${country}${raw}`;
+  }
+
+  if (country === "AT") {
+    if (/^ATU/.test(raw)) return raw;
+    if (/^AT/.test(raw)) return `ATU${raw.slice(2).replace(/^U/, "")}`;
+    if (/^U/.test(raw)) return `AT${raw}`;
+    return `ATU${raw}`;
+  }
+
+  return raw;
+}
+
+function shouldApplyReverseCharge({
+  shopCountry,
+  billingCountry,
+  viesValid,
+}: {
+  shopCountry: string;
+  billingCountry: string;
+  viesValid: boolean | null;
+}) {
+  return viesValid === true && normalizeCountry(shopCountry) !== normalizeCountry(billingCountry);
+}
+
+async function checkVatVies(vatNumber: string) {
+  const normalized = normalizeVat(vatNumber);
+  const countryCode = normalized.slice(0, 2);
+  const number = normalized.slice(2);
+
+  if (!countryCode || !number || countryCode.length !== 2) {
+    throw new Error("VAT number is missing country prefix or number.");
+  }
+
+  console.log("[Invoice Request] VIES SOAP request", {
+    fullVatNumber: normalized,
+    countryCode,
+    vatNumber: number,
+  });
+
+  const client = await soap.createClientAsync(VIES_WSDL);
+  const [result] = await client.checkVatAsync({
+    countryCode,
+    vatNumber: number,
+  });
+
+  const response = {
+    valid: Boolean(result?.valid === true || String(result?.valid).toLowerCase() === "true"),
+    companyName: cleanViesValue(result?.name || ""),
+    address: cleanViesValue(result?.address || ""),
+    countryCode,
+    vatNumber: normalized,
+    raw: result || null,
+  };
+
+  console.log("[Invoice Request] VIES SOAP response", response);
+
+  return response;
 }
 
 async function findCustomerByEmail(admin: any, email: string) {
@@ -307,8 +294,8 @@ async function createCompanyForInvoiceRequest({
   fiscalMetafields: Record<string, string>;
 }) {
   const effectiveCompanyName =
-    cleanViesText(viesCompanyName) ||
     String(companyName || "").trim() ||
+    cleanViesText(viesCompanyName) ||
     String(customer?.email || "").trim() ||
     "Azienda B2B";
 
@@ -462,7 +449,7 @@ export async function action({ request }: ActionFunctionArgs) {
     const invoiceType = String(payload.invoiceType || "private");
     const cartToken = String(payload.cartToken || "");
     const countryCode = normalizeCountry(payload.countryCode || "IT");
-    let vatNumber = normalizeVat(payload.vatNumber || "");
+    let vatNumber = normalizeVatForCountry(payload.vatNumber || "", countryCode);
     const companyName = String(payload.companyName || "").trim();
     const customerEmail = String(payload.customerEmail || payload.email || "").trim().toLowerCase();
     const pec = String(payload.pec || "").trim();
@@ -520,58 +507,47 @@ export async function action({ request }: ActionFunctionArgs) {
     let pendingManualReview = false;
 
     try {
-      const shouldCheckVies =
-        invoiceType === "company" &&
-        ENABLE_VIES_CHECK &&
-        EU_COUNTRIES.has(countryCode);
+      const vies = await checkVatVies(vatNumber);
 
-      if (shouldCheckVies) {
-        const verification = await checkViesSoap(countryCode, vatNumber);
+      viesChecked = true;
+      viesValid = vies.valid === true;
+      viesCompanyName = vies.companyName || "";
+      viesAddress = vies.address || "";
+      vatNumber = vies.vatNumber || vatNumber;
 
-        viesChecked = true;
-        viesValid = verification.valid === true ? true : verification.valid === false ? false : null;
-        viesCompanyName = verification.companyName || "";
-        viesAddress = verification.address || "";
-        vatNumber = verification.vatNumber || vatNumber;
-
-        reverseCharge = shouldApplyReverseCharge({
-          shopCountry: SHOP_COUNTRY,
-          billingCountry: countryCode,
-          viesValid,
-        });
-
-        if (verification.unavailable) {
-          status = "pending_review";
-          pendingManualReview = true;
-          viesValid = null;
-          reverseCharge = false;
-        } else if (viesValid !== true) {
-          status = "pending_review";
-          pendingManualReview = true;
-          reverseCharge = false;
-        }
-      } else {
-        viesChecked = false;
-        viesValid = null;
-        reverseCharge = false;
-      }
+      reverseCharge = shouldApplyReverseCharge({
+        shopCountry: SHOP_COUNTRY,
+        billingCountry: countryCode,
+        viesValid,
+      });
 
       if (viesValid && customerEmail) {
         preparedCustomer = await createOrPrepareInvoiceCustomer({
           shop,
           email: customerEmail,
-          companyName: viesCompanyName || companyName,
+          companyName: companyName || viesCompanyName,
           taxExempt: Boolean(reverseCharge),
         });
 
         taxExemptCustomerPrepared = Boolean(reverseCharge && preparedCustomer?.taxExempt);
       }
+
+      if (!viesValid) {
+        status = "pending_review";
+        pendingManualReview = true;
+      }
     } catch (error) {
-      console.error("Invoice VIES SOAP check failed:", error);
+      console.error("Invoice VIES SOAP check failed:", {
+        error,
+        countryCode,
+        vatNumber,
+        companyName,
+        customerEmail,
+      });
 
       status = "pending_review";
       pendingManualReview = true;
-      viesChecked = false;
+      viesChecked = true;
       viesValid = null;
       reverseCharge = false;
       taxExemptCustomerPrepared = false;
