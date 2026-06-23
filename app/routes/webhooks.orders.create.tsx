@@ -505,6 +505,9 @@ function buildInvoiceNote(data: any) {
       "",
       `VIES checked: ${labelBool(data.viesChecked)}`,
       `VIES valid: ${labelBool(data.viesValid)}`,
+      `VIES company: ${data.viesCompanyName || "-"}`,
+      `VIES address: ${data.viesAddress || "-"}`,
+      `Needs manual review: ${labelBool(data.needsManualReview)}`,
       `Reverse charge: ${labelBool(data.reverseCharge)}`,
       `Tax exempt applied: ${labelBool(data.taxExemptApplied)}`,
     );
@@ -538,8 +541,13 @@ function buildB2BFiscalNote(orderApi: any, b2bMeta: Record<string, string>) {
     `PEC: ${b2bMeta.pec || "-"}`,
     `SDI: ${b2bMeta.codice_destinatario || "-"}`,
     "",
+    `Company ID: ${b2bMeta.company_id || "-"}`,
+    `Company Location ID: ${b2bMeta.company_location_id || "-"}`,
+    "",
     `VIES status: ${b2bMeta.vies_status || "-"}`,
     `VIES match score: ${b2bMeta.vies_match_score || "-"}`,
+    `Reverse charge: ${labelBool(b2bMeta.reverse_charge)}`,
+    `Tax exempt: ${labelBool(b2bMeta.tax_exempt)}`,
     `Verified at: ${b2bMeta.verified_at || "-"}`,
     "",
     `Customer email: ${orderApi?.customer?.email || orderApi?.email || "-"}`,
@@ -563,6 +571,35 @@ function hasB2BMeta(meta: Record<string, string>) {
     meta.pec ||
     meta.codice_destinatario,
   );
+}
+
+function getB2BCompanyId(orderApi: any, b2bMeta: Record<string, string>) {
+  return (
+    normalize(b2bMeta.company_id) ||
+    normalize(orderApi?.customer?.companyContactProfiles?.nodes?.[0]?.company?.id)
+  );
+}
+
+function getB2BCompanyName(orderApi: any, b2bMeta: Record<string, string>) {
+  return (
+    normalize(orderApi?.customer?.companyContactProfiles?.nodes?.[0]?.company?.name) ||
+    normalize(b2bMeta.company_name_submitted) ||
+    normalize(b2bMeta.vies_company_name)
+  );
+}
+
+function getB2BReverseCharge(meta: Record<string, string>) {
+  const explicit = normalize(meta.reverse_charge);
+  if (explicit) return explicit;
+
+  const country = normalize(meta.billing_country).toUpperCase();
+  return country && country !== "IT" ? "true" : "false";
+}
+
+function getB2BTaxExempt(meta: Record<string, string>) {
+  const explicit = normalize(meta.tax_exempt);
+  if (explicit) return explicit;
+  return getB2BReverseCharge(meta);
 }
 
 function getOrderGid(orderPayload: any) {
@@ -665,6 +702,14 @@ function buildInvoiceData({ orderPayload, orderApi, invoiceRequest }: any) {
     normalize(customer?.viesValid?.value) ||
     booleanToString(invoiceRequest?.viesValid);
 
+  const viesCompanyName = normalize(invoiceRequest?.viesCompanyName);
+  const viesAddress = normalize(invoiceRequest?.viesAddress);
+  const needsManualReview =
+    normalize(invoiceRequest?.status) === "pending_review" ||
+    (yes(viesChecked) && viesValid === "false")
+      ? "true"
+      : "false";
+
   const reverseCharge =
     getAttrFromPairs(allPairs, ["reverse_charge"]) ||
     normalize(customer?.reverseCharge?.value) ||
@@ -688,6 +733,9 @@ function buildInvoiceData({ orderPayload, orderApi, invoiceRequest }: any) {
     billingCountry,
     viesChecked,
     viesValid,
+    viesCompanyName,
+    viesAddress,
+    needsManualReview,
     reverseCharge,
     taxExemptApplied,
   };
@@ -758,6 +806,7 @@ export const action = async ({ request }: any) => {
 
       await setMetafields(admin, orderGid, {
         "invoice.request_id": invoiceData.invoiceRequestId,
+        "invoice.source": "cart_invoice_request",
         "invoice.invoice_type": invoiceData.invoiceType,
         "invoice.company_name": invoiceData.companyName,
         "invoice.vat_number": invoiceData.vatNumber,
@@ -765,7 +814,11 @@ export const action = async ({ request }: any) => {
         "invoice.fiscal_code": invoiceData.fiscalCode,
         "invoice.pec": invoiceData.pec,
         "invoice.codice_destinatario": invoiceData.codiceDestinatario,
+        "invoice.vies_checked": invoiceData.viesChecked,
         "invoice.vies_valid": invoiceData.viesValid,
+        "invoice.vies_company_name": invoiceData.viesCompanyName,
+        "invoice.vies_address": invoiceData.viesAddress,
+        "invoice.needs_manual_review": invoiceData.needsManualReview,
         "invoice.reverse_charge": invoiceData.reverseCharge,
         "invoice.tax_exempt_applied": invoiceData.taxExemptApplied,
         "invoice.fiscal_note": fiscalNote,
@@ -815,15 +868,27 @@ export const action = async ({ request }: any) => {
         const b2bNote = buildB2BFiscalNote(orderApi, b2bMeta);
         nextNote = replaceBlock(nextNote, b2bNote, B2B_START, B2B_END);
 
+        const b2bCompanyId = getB2BCompanyId(orderApi, b2bMeta);
+        const b2bCompanyName = getB2BCompanyName(orderApi, b2bMeta);
+        const b2bReverseCharge = getB2BReverseCharge(b2bMeta);
+        const b2bTaxExempt = getB2BTaxExempt(b2bMeta);
+
         await setMetafields(admin, orderGid, {
+          "b2b.is_b2b": "true",
+          "b2b.source": "b2b_form",
+          "b2b.company_id": b2bCompanyId,
+          "b2b.company_location_id": b2bMeta.company_location_id || "",
           "b2b.vat_number": b2bMeta.vat_number || "",
           "b2b.billing_country": b2bMeta.billing_country || "",
-          "b2b.company_name_submitted": b2bMeta.company_name_submitted || "",
+          "b2b.company_name_submitted": b2bMeta.company_name_submitted || b2bCompanyName,
           "b2b.vies_company_name": b2bMeta.vies_company_name || "",
+          "b2b.vies_address": b2bMeta.vies_address || "",
           "b2b.pec": b2bMeta.pec || "",
           "b2b.codice_destinatario": b2bMeta.codice_destinatario || "",
           "b2b.vies_status": b2bMeta.vies_status || "",
           "b2b.vies_match_score": b2bMeta.vies_match_score || "",
+          "b2b.reverse_charge": b2bReverseCharge,
+          "b2b.tax_exempt": b2bTaxExempt,
           "b2b.fiscal_note": b2bNote,
         });
 

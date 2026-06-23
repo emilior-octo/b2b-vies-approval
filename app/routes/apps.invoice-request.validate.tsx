@@ -792,14 +792,17 @@ export async function action({ request }: ActionFunctionArgs) {
 
     const isItaly = countryCode === "IT";
 
-    if (!customerEmail) {
+    // For Italian invoice requests we do not need an email here: the fiscal data will be stored
+    // on the cart/order and handled by the ERP. For EU non-IT companies, email is required only
+    // because we need to find/create the customer and prepare reverse charge tax exemption.
+    if (!isItaly && !customerEmail) {
       return json(
         {
           ok: false,
           error:
             locale === "it"
-              ? "Inserisci l’email che userai al checkout. Serve per associare il cliente all’azienda prima dell’ordine."
-              : "Enter the email you will use at checkout. It is required to link the customer to the company before the order.",
+              ? "Inserisci l’email che userai al checkout. Serve per preparare il profilo cliente per il reverse charge."
+              : "Enter the email you will use at checkout. It is required to prepare the customer profile for reverse charge.",
         },
         { status: 400 },
       );
@@ -852,19 +855,19 @@ export async function action({ request }: ActionFunctionArgs) {
       taxExemptCustomerPrepared = false;
     }
 
-    if (viesValid && customerEmail) {
+    if (reverseCharge && customerEmail) {
       try {
         preparedCustomer = await createOrPrepareInvoiceCustomer({
           shop,
           email: customerEmail,
           companyName: companyName || viesCompanyName,
-          taxExempt: Boolean(reverseCharge),
+          taxExempt: true,
         });
 
-        taxExemptCustomerPrepared = Boolean(reverseCharge && preparedCustomer?.taxExempt);
+        taxExemptCustomerPrepared = Boolean(preparedCustomer?.taxExempt);
       } catch (error) {
         shopifySyncError = errorMessage(error);
-        console.error("[Invoice Request] Shopify customer sync failed after valid VIES", {
+        console.error("[Invoice Request] Shopify tax exempt customer sync failed after valid VIES", {
           error: shopifySyncError,
           countryCode,
           vatNumber,
@@ -896,62 +899,11 @@ export async function action({ request }: ActionFunctionArgs) {
       },
     });
 
-    let invoiceCompany: any = null;
+    // Important: invoice requests are not B2B Company requests.
+    // We intentionally do not create or assign Shopify Companies here.
+    // Real B2B customers are handled by app/routes/api.b2b-verify.tsx.
 
-    if (invoiceType === "company" && preparedCustomer?.id && viesValid) {
-      const { admin } = await unauthenticated.admin(shop);
-      const viesStatus =
-        viesValid && !String(viesCompanyName || "").trim() && VIES_NAME_UNAVAILABLE_COUNTRIES.includes(countryCode)
-          ? "valid_name_unavailable"
-          : viesValid
-            ? "valid"
-            : "invalid";
 
-      const fiscalMetafields = {
-        "b2b.vat_number": vatNumber,
-        "b2b.billing_country": countryCode,
-        "b2b.company_name_submitted": companyName,
-        "b2b.vies_company_name": viesCompanyName || "",
-        "b2b.vies_address": viesAddress || "",
-        "b2b.vies_status": viesStatus,
-        "b2b.reverse_charge": reverseCharge ? "true" : "false",
-        "b2b.pec": isItaly ? pec : "",
-        "b2b.codice_destinatario": isItaly ? sdi : "",
-        "b2b.invoice_request_id": invoiceRequest.id,
-      };
-
-      try {
-        invoiceCompany = await createCompanyForInvoiceRequest({
-          admin,
-          customer: preparedCustomer,
-          companyName,
-          vatNumber,
-          countryCode,
-          viesCompanyName,
-          viesAddress,
-          fiscalMetafields,
-        });
-
-        if (invoiceCompany?.companyId || invoiceCompany?.companyLocationId) {
-          console.log("[Invoice Request] Shopify company synced", {
-            invoiceRequestId: invoiceRequest.id,
-            companyId: invoiceCompany.companyId || "",
-            companyLocationId: invoiceCompany.companyLocationId || "",
-          });
-        }
-      } catch (error) {
-        shopifySyncError = errorMessage(error);
-        console.error("[Invoice Request] Shopify company sync failed after valid VIES", {
-          error: shopifySyncError,
-          invoiceRequestId: invoiceRequest.id,
-          customerId: preparedCustomer?.id || "",
-          countryCode,
-          vatNumber,
-          companyName,
-          viesCompanyName,
-        });
-      }
-    }
 
     return json({
       ok: true,
@@ -970,16 +922,14 @@ export async function action({ request }: ActionFunctionArgs) {
       mustUseSameEmailAtCheckout: Boolean(reverseCharge && customerEmail),
       pendingManualReview,
       shopifySyncError: shopifySyncError || undefined,
-      company: invoiceCompany,
-      requiresCustomerLoginForB2BOrder: Boolean(invoiceCompany?.companyId && !isLoggedCustomer),
       message: pendingManualReview
         ? locale === "it"
           ? "Richiesta salvata per verifica manuale. Controlleremo il VAT prima della fatturazione."
           : "Invoice request saved for manual review. We will check the VAT before invoicing."
         : shopifySyncError
           ? locale === "it"
-            ? `VAT valido, ma sincronizzazione Shopify non completata: ${shopifySyncError}`
-            : `VAT valid, but Shopify sync was not completed: ${shopifySyncError}`
+            ? `VAT valido, ma preparazione reverse charge non completata: ${shopifySyncError}`
+            : `VAT valid, but reverse charge preparation was not completed: ${shopifySyncError}`
           : undefined,
     });
   } catch (error: any) {
