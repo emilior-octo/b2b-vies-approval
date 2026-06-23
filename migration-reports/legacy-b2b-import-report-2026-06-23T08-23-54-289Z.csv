@@ -1,0 +1,5 @@
+row,mode,status,decision,email,customerId,companyName,vatInput,vatNormalized,billingCountry,reverseChargeEligible,issues,shopifyCustomerId,shopifyCompanyId,shopifyCompanyLocationId,error
+2,live,ok,rejected,stepi1979@gmail.com,gid://shopify/Customer/25469365191043,La Bottega dei Santi,IT01700350992,IT01700350992,IT,false,,gid://shopify/Customer/25469365191043,,,
+3,live,ok,rejected,drogheriamansi@libero.it,gid://shopify/Customer/25396588577155,DROGHERIA MANSI SNC,IT08130040721,IT08130040721,IT,false,,gid://shopify/Customer/25396588577155,,,
+4,live,ok,approved,info@piccolopevero.it,gid://shopify/Customer/25395248202115,Hotel Piccolo Pevero Srl,IT02740780909,IT02740780909,IT,false,,gid://shopify/Customer/25395248202115,,,
+5,live,ok,rejected,iltempiodelgusto125@gmail.com,gid://shopify/Customer/25204740817283,il tempio del gusto,01307780773,IT01307780773,IT,false,,gid://shopify/Customer/25204740817283,,,
