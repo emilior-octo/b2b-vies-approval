@@ -165,6 +165,8 @@ async function findCustomerByEmail(admin: any, email: string) {
           nodes {
             id
             email
+            firstName
+            lastName
             taxExempt
             tags
             companyContactProfiles {
@@ -221,20 +223,67 @@ async function setOwnerMetafields(
   return data?.data?.metafieldsSet?.metafields || [];
 }
 
-async function updateCustomerTaxExempt(admin: any, customerId: string, taxExempt: boolean) {
-  if (!customerId) return null;
+function customerNamesFromCompanyOrEmail(companyName: string | undefined, email: string) {
+  const cleanedCompany = cleanViesText(companyName);
+  if (cleanedCompany) {
+    return {
+      firstName: cleanedCompany.slice(0, 40),
+      lastName: "B2B",
+    };
+  }
+
+  const localPart = String(email || "").split("@")[0] || "Cliente";
+  const readable = localPart
+    .replace(/[._-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  return {
+    firstName: (readable || "Cliente").slice(0, 40),
+    lastName: "B2B",
+  };
+}
+
+function isInvoicePlaceholderCustomer(customer: any) {
+  const firstName = String(customer?.firstName || "").trim().toLowerCase();
+  const lastName = String(customer?.lastName || "").trim().toLowerCase();
+
+  if (!firstName && !lastName) return true;
+  return firstName === "invoice" && lastName === "customer";
+}
+
+async function updateCustomerForInvoice(
+  admin: any,
+  customer: any,
+  { companyName, email, taxExempt }: { companyName?: string; email: string; taxExempt: boolean },
+) {
+  if (!customer?.id) return null;
+
+  const suggestedNames = customerNamesFromCompanyOrEmail(companyName, email);
+  const shouldUpdateName = isInvoicePlaceholderCustomer(customer);
+
+  const input: any = {
+    id: customer.id,
+    taxExempt,
+  };
+
+  if (shouldUpdateName) {
+    input.firstName = suggestedNames.firstName;
+    input.lastName = suggestedNames.lastName;
+    input.note = `Invoice request company invoice - ${cleanViesText(companyName) || email}`;
+  }
 
   const data = await graphQL(
     admin,
     `#graphql
-      mutation CustomerUpdateTaxExempt($input: CustomerInput!) {
+      mutation CustomerUpdateForInvoice($input: CustomerInput!) {
         customerUpdate(input: $input) {
-          customer { id email taxExempt tags }
+          customer { id email firstName lastName taxExempt tags }
           userErrors { field message }
         }
       }
     `,
-    { input: { id: customerId, taxExempt } },
+    { input },
   );
 
   const errors = data?.data?.customerUpdate?.userErrors || [];
@@ -276,6 +325,8 @@ async function createOrPrepareInvoiceCustomer({
   if (!email) return null;
 
   const { admin } = await unauthenticated.admin(shop);
+  // IMPORTANT: do not add b2b_customer here.
+  // These invoice-request customers must be associated to a Company, but they must not receive discount tags.
   const tags = taxExempt
     ? ["invoice_request", "reverse_charge_customer"]
     : ["invoice_request", "company_invoice_customer"];
@@ -291,6 +342,8 @@ async function createOrPrepareInvoiceCustomer({
             customer {
               id
               email
+              firstName
+              lastName
               taxExempt
               tags
               companyContactProfiles {
@@ -305,9 +358,8 @@ async function createOrPrepareInvoiceCustomer({
       {
         input: {
           email,
-          firstName: "Invoice",
-          lastName: "Customer",
-          note: `Invoice request company invoice - ${companyName || ""}`,
+          ...customerNamesFromCompanyOrEmail(companyName, email),
+          note: `Invoice request company invoice - ${cleanViesText(companyName) || email}`,
           tags,
         },
       },
@@ -321,7 +373,11 @@ async function createOrPrepareInvoiceCustomer({
 
   if (!customer?.id) return null;
 
-  const updatedCustomer = await updateCustomerTaxExempt(admin, customer.id, taxExempt);
+  const updatedCustomer = await updateCustomerForInvoice(admin, customer, {
+    companyName,
+    email,
+    taxExempt,
+  });
   await addCustomerTags(admin, customer.id, tags);
 
   return {
@@ -335,11 +391,192 @@ function cleanViesText(value: string | null | undefined) {
   if (!text) return "";
 
   const normalized = text.replace(/[-–—_\s]+/g, "").toLowerCase();
-  if (["na", "n/a", "null", "none", "unknown", "unavailable"].includes(normalized)) {
+  if (!normalized || ["na", "n/a", "null", "none", "unknown", "unavailable"].includes(normalized)) {
     return "";
   }
 
   return text;
+}
+
+function customerCompanyProfiles(customer: any) {
+  const profiles = customer?.companyContactProfiles;
+  if (Array.isArray(profiles)) return profiles;
+  if (Array.isArray(profiles?.nodes)) return profiles.nodes;
+  return [];
+}
+
+function sameCompanyName(left: string | undefined, right: string | undefined) {
+  const normalize = (value: string | undefined) =>
+    cleanViesText(value).toLowerCase().replace(/\s+/g, " ").trim();
+
+  const a = normalize(left);
+  const b = normalize(right);
+
+  return Boolean(a && b && a === b);
+}
+
+async function findCompanyByExactName(admin: any, companyName: string) {
+  const cleanedName = cleanViesText(companyName);
+  if (!cleanedName) return null;
+
+  const queryValue = `name:'${cleanedName.replace(/'/g, "\\'")}'`;
+
+  const data = await graphQL(
+    admin,
+    `#graphql
+      query FindInvoiceCompanyByName($query: String!) {
+        companies(first: 10, query: $query) {
+          nodes {
+            id
+            name
+            contactRoles(first: 10) { nodes { id name } }
+            locations(first: 10) { nodes { id name } }
+          }
+        }
+      }
+    `,
+    { query: queryValue },
+  );
+
+  if (data?.errors?.length) {
+    console.error("[Invoice Request] Company lookup by name failed", {
+      companyName: cleanedName,
+      errors: JSON.stringify(data.errors),
+    });
+    return null;
+  }
+
+  const nodes = data?.data?.companies?.nodes || [];
+  return nodes.find((company: any) => sameCompanyName(company?.name, cleanedName)) || null;
+}
+
+async function findCompanyContactForCustomer(admin: any, customerId: string, companyId: string) {
+  if (!customerId || !companyId) return null;
+
+  const data = await graphQL(
+    admin,
+    `#graphql
+      query FindCustomerCompanyContact($id: ID!) {
+        customer(id: $id) {
+          id
+          companyContactProfiles {
+            id
+            company { id name }
+          }
+        }
+      }
+    `,
+    { id: customerId },
+  );
+
+  const profiles = customerCompanyProfiles(data?.data?.customer || {});
+  return profiles.find((profile: any) => profile?.company?.id === companyId) || null;
+}
+
+function firstCompanyLocation(company: any) {
+  return company?.locations?.nodes?.[0] || company?.locations?.[0] || null;
+}
+
+function firstCompanyRole(company: any) {
+  return company?.contactRoles?.nodes?.[0] || company?.contactRoles?.[0] || null;
+}
+
+async function assignRoleToCompanyLocation({
+  admin,
+  companyContactId,
+  companyLocationId,
+  companyContactRoleId,
+}: {
+  admin: any;
+  companyContactId: string;
+  companyLocationId: string;
+  companyContactRoleId: string;
+}) {
+  if (!companyContactId || !companyLocationId || !companyContactRoleId) {
+    return { roleAssigned: false, skipped: true };
+  }
+
+  const roleData = await graphQL(
+    admin,
+    `#graphql
+      mutation AssignRole($companyContactId: ID!, $companyLocationId: ID!, $companyContactRoleId: ID!) {
+        companyContactAssignRole(
+          companyContactId: $companyContactId
+          companyLocationId: $companyLocationId
+          companyContactRoleId: $companyContactRoleId
+        ) { userErrors { field message } }
+      }
+    `,
+    {
+      companyContactId,
+      companyLocationId,
+      companyContactRoleId,
+    },
+  );
+
+  const roleErrors = roleData?.data?.companyContactAssignRole?.userErrors || [];
+  const alreadyAssigned = roleErrors.some((error: any) =>
+    String(error?.message || "").toLowerCase().includes("already"),
+  );
+
+  if (roleErrors.length && !alreadyAssigned) {
+    throw new Error(roleErrors.map((e: any) => e.message).join(" | "));
+  }
+
+  return { roleAssigned: true, alreadyAssigned };
+}
+
+async function assignCustomerToExistingCompany(admin: any, company: any, customer: any) {
+  if (!company?.id || !customer?.id) {
+    return { contactId: "", locationId: "", roleAssigned: false };
+  }
+
+  let contactId = "";
+
+  const assignData = await graphQL(
+    admin,
+    `#graphql
+      mutation AssignCustomer($companyId: ID!, $customerId: ID!) {
+        companyAssignCustomerAsContact(companyId: $companyId, customerId: $customerId) {
+          companyContact { id }
+          userErrors { field message }
+        }
+      }
+    `,
+    { companyId: company.id, customerId: customer.id },
+  );
+
+  const assignErrors = assignData?.data?.companyAssignCustomerAsContact?.userErrors || [];
+  const alreadyAssigned = assignErrors.some((error: any) =>
+    String(error?.message || "").toLowerCase().includes("already"),
+  );
+
+  if (assignErrors.length && !alreadyAssigned) {
+    throw new Error(assignErrors.map((e: any) => e.message).join(" | "));
+  }
+
+  contactId = assignData?.data?.companyAssignCustomerAsContact?.companyContact?.id || "";
+
+  if (!contactId) {
+    const existingContact = await findCompanyContactForCustomer(admin, customer.id, company.id);
+    contactId = existingContact?.id || "";
+  }
+
+  const location = firstCompanyLocation(company);
+  const role = firstCompanyRole(company);
+  const roleResult = await assignRoleToCompanyLocation({
+    admin,
+    companyContactId: contactId,
+    companyLocationId: location?.id || "",
+    companyContactRoleId: role?.id || "",
+  });
+
+  return {
+    contactId,
+    locationId: location?.id || "",
+    roleAssigned: Boolean(roleResult.roleAssigned),
+    contactAlreadyAssigned: alreadyAssigned,
+  };
 }
 
 async function createCompanyForInvoiceRequest({
@@ -362,29 +599,42 @@ async function createCompanyForInvoiceRequest({
   fiscalMetafields: Record<string, string>;
 }) {
   const effectiveCompanyName =
-    String(companyName || "").trim() ||
+    cleanViesText(companyName) ||
     cleanViesText(viesCompanyName) ||
     String(customer?.email || "").trim() ||
     "Azienda B2B";
 
   if (!customer?.id) return null;
 
-  const existingCompany =
-    customer?.companyContactProfiles?.[0]?.company ||
-    customer?.companyContactProfiles?.nodes?.[0]?.company ||
+  const existingCompanyFromCustomer =
+    customerCompanyProfiles(customer)?.[0]?.company ||
     null;
+
+  const existingCompanyByName = existingCompanyFromCustomer?.id
+    ? null
+    : await findCompanyByExactName(admin, effectiveCompanyName);
+
+  const existingCompany = existingCompanyFromCustomer || existingCompanyByName || null;
+
   if (existingCompany?.id) {
+    const assignment = await assignCustomerToExistingCompany(admin, existingCompany, customer);
+
     await setOwnerMetafields(admin, existingCompany.id, fiscalMetafields);
     await setOwnerMetafields(admin, customer.id, {
       ...fiscalMetafields,
       "b2b.company_id": existingCompany.id,
+      "b2b.company_location_id": assignment.locationId || "",
     });
 
     return {
       companyId: existingCompany.id,
-      companyLocationId: null,
+      companyLocationId: assignment.locationId || null,
       companyName: existingCompany.name || effectiveCompanyName,
-      alreadyAssigned: true,
+      companyContactId: assignment.contactId || null,
+      roleAssigned: Boolean(assignment.roleAssigned),
+      contactAlreadyAssigned: Boolean(assignment.contactAlreadyAssigned),
+      alreadyAssigned: Boolean(existingCompanyFromCustomer?.id),
+      reusedExistingCompany: Boolean(existingCompanyByName?.id),
     };
   }
 
@@ -452,29 +702,12 @@ async function createCompanyForInvoiceRequest({
   if (assignErrors.length) throw new Error(assignErrors.map((e: any) => e.message).join(" | "));
 
   const contact = assignData?.data?.companyAssignCustomerAsContact?.companyContact;
-
-  if (contact?.id) {
-    const roleData = await graphQL(
-      admin,
-      `#graphql
-        mutation AssignRole($companyContactId: ID!, $companyLocationId: ID!, $companyContactRoleId: ID!) {
-          companyContactAssignRole(
-            companyContactId: $companyContactId
-            companyLocationId: $companyLocationId
-            companyContactRoleId: $companyContactRoleId
-          ) { userErrors { field message } }
-        }
-      `,
-      {
-        companyContactId: contact.id,
-        companyLocationId: location.id,
-        companyContactRoleId: role.id,
-      },
-    );
-
-    const roleErrors = roleData?.data?.companyContactAssignRole?.userErrors || [];
-    if (roleErrors.length) throw new Error(roleErrors.map((e: any) => e.message).join(" | "));
-  }
+  const roleResult = await assignRoleToCompanyLocation({
+    admin,
+    companyContactId: contact?.id || "",
+    companyLocationId: location.id,
+    companyContactRoleId: role.id,
+  });
 
   await setOwnerMetafields(admin, company.id, {
     ...fiscalMetafields,
@@ -492,6 +725,8 @@ async function createCompanyForInvoiceRequest({
     companyId: company.id,
     companyLocationId: location.id,
     companyName: company.name,
+    companyContactId: contact?.id || null,
+    roleAssigned: Boolean(roleResult.roleAssigned),
   };
 }
 
@@ -514,6 +749,9 @@ export async function action({ request }: ActionFunctionArgs) {
 
   try {
     const payload = await request.json();
+    const url = new URL(request.url);
+    const loggedInCustomerId = String(url.searchParams.get("logged_in_customer_id") || "").trim();
+    const isLoggedCustomer = Boolean(loggedInCustomerId);
 
     const shop = DEFAULT_SHOP;
     const locale = String(payload.locale || "it").toLowerCase();
@@ -733,6 +971,7 @@ export async function action({ request }: ActionFunctionArgs) {
       pendingManualReview,
       shopifySyncError: shopifySyncError || undefined,
       company: invoiceCompany,
+      requiresCustomerLoginForB2BOrder: Boolean(invoiceCompany?.companyId && !isLoggedCustomer),
       message: pendingManualReview
         ? locale === "it"
           ? "Richiesta salvata per verifica manuale. Controlleremo il VAT prima della fatturazione."
