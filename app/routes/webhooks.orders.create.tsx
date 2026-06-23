@@ -130,6 +130,19 @@ function getWebhookAttributes(order: any) {
   ];
 }
 
+function makePairsFromMetafields(nodes: any[]) {
+  return (nodes || []).flatMap((node: any) => {
+    const namespace = normalize(node?.namespace);
+    const key = normalize(node?.key);
+    const value = normalize(node?.value);
+
+    return [
+      { key, value },
+      { key: namespace && key ? `${namespace}.${key}` : key, value },
+    ].filter((pair) => normalize(pair.key));
+  });
+}
+
 function getAttrFromPairs(pairs: any[], keys: string[]) {
   const wanted = keys.map(normalizeKey);
 
@@ -225,6 +238,9 @@ async function getOrderApiData(admin: any, orderGid: string) {
             viesChecked: metafield(namespace: "custom", key: "vies_checked") { value }
             viesValid: metafield(namespace: "custom", key: "vies_valid") { value }
             reverseCharge: metafield(namespace: "custom", key: "reverse_charge") { value }
+            allMetafields: metafields(first: 100) {
+              nodes { namespace key value }
+            }
             companyContactProfiles(first: 5) {
               nodes {
                 company { id name }
@@ -505,9 +521,6 @@ function buildInvoiceNote(data: any) {
       "",
       `VIES checked: ${labelBool(data.viesChecked)}`,
       `VIES valid: ${labelBool(data.viesValid)}`,
-      `VIES company: ${data.viesCompanyName || "-"}`,
-      `VIES address: ${data.viesAddress || "-"}`,
-      `Needs manual review: ${labelBool(data.needsManualReview)}`,
       `Reverse charge: ${labelBool(data.reverseCharge)}`,
       `Tax exempt applied: ${labelBool(data.taxExemptApplied)}`,
     );
@@ -541,13 +554,8 @@ function buildB2BFiscalNote(orderApi: any, b2bMeta: Record<string, string>) {
     `PEC: ${b2bMeta.pec || "-"}`,
     `SDI: ${b2bMeta.codice_destinatario || "-"}`,
     "",
-    `Company ID: ${b2bMeta.company_id || "-"}`,
-    `Company Location ID: ${b2bMeta.company_location_id || "-"}`,
-    "",
     `VIES status: ${b2bMeta.vies_status || "-"}`,
     `VIES match score: ${b2bMeta.vies_match_score || "-"}`,
-    `Reverse charge: ${labelBool(b2bMeta.reverse_charge)}`,
-    `Tax exempt: ${labelBool(b2bMeta.tax_exempt)}`,
     `Verified at: ${b2bMeta.verified_at || "-"}`,
     "",
     `Customer email: ${orderApi?.customer?.email || orderApi?.email || "-"}`,
@@ -573,35 +581,6 @@ function hasB2BMeta(meta: Record<string, string>) {
   );
 }
 
-function getB2BCompanyId(orderApi: any, b2bMeta: Record<string, string>) {
-  return (
-    normalize(b2bMeta.company_id) ||
-    normalize(orderApi?.customer?.companyContactProfiles?.nodes?.[0]?.company?.id)
-  );
-}
-
-function getB2BCompanyName(orderApi: any, b2bMeta: Record<string, string>) {
-  return (
-    normalize(orderApi?.customer?.companyContactProfiles?.nodes?.[0]?.company?.name) ||
-    normalize(b2bMeta.company_name_submitted) ||
-    normalize(b2bMeta.vies_company_name)
-  );
-}
-
-function getB2BReverseCharge(meta: Record<string, string>) {
-  const explicit = normalize(meta.reverse_charge);
-  if (explicit) return explicit;
-
-  const country = normalize(meta.billing_country).toUpperCase();
-  return country && country !== "IT" ? "true" : "false";
-}
-
-function getB2BTaxExempt(meta: Record<string, string>) {
-  const explicit = normalize(meta.tax_exempt);
-  if (explicit) return explicit;
-  return getB2BReverseCharge(meta);
-}
-
 function getOrderGid(orderPayload: any) {
   return (
     orderPayload.admin_graphql_api_id ||
@@ -622,8 +601,11 @@ function getCustomerGid(orderPayload: any, orderApi: any) {
 function buildInvoiceData({ orderPayload, orderApi, invoiceRequest }: any) {
   const webhookPairs = getWebhookAttributes(orderPayload);
   const apiPairs = orderApi?.customAttributes || [];
-  const allPairs = [...webhookPairs, ...apiPairs];
   const customer = orderApi?.customer || {};
+  const customerMetafieldPairs = makePairsFromMetafields(
+    customer?.allMetafields?.nodes || [],
+  );
+  const allPairs = [...webhookPairs, ...apiPairs, ...customerMetafieldPairs];
 
   const invoiceType =
     getAttrFromPairs(allPairs, INVOICE_TYPE_KEYS) ||
@@ -657,20 +639,20 @@ function buildInvoiceData({ orderPayload, orderApi, invoiceRequest }: any) {
     normalize(invoiceRequest?.email);
 
   const fiscalCode =
-    getAttrFromPairs(allPairs, FISCAL_CODE_KEYS) ||
     getLocalizationValue(orderApi, FISCAL_CODE_KEYS) ||
+    getAttrFromPairs(allPairs, FISCAL_CODE_KEYS) ||
     normalize(customer?.fiscalCode?.value) ||
     normalize(invoiceRequest?.fiscalCode);
 
   const pec =
-    getAttrFromPairs(allPairs, PEC_KEYS) ||
     getLocalizationValue(orderApi, PEC_KEYS) ||
+    getAttrFromPairs(allPairs, PEC_KEYS) ||
     normalize(customer?.pec?.value) ||
     normalize(invoiceRequest?.pec);
 
   const codiceDestinatario =
-    getAttrFromPairs(allPairs, SDI_KEYS) ||
     getLocalizationValue(orderApi, SDI_KEYS) ||
+    getAttrFromPairs(allPairs, SDI_KEYS) ||
     normalize(customer?.sdi?.value) ||
     normalize(invoiceRequest?.codiceDestinatario);
 
@@ -702,14 +684,6 @@ function buildInvoiceData({ orderPayload, orderApi, invoiceRequest }: any) {
     normalize(customer?.viesValid?.value) ||
     booleanToString(invoiceRequest?.viesValid);
 
-  const viesCompanyName = normalize(invoiceRequest?.viesCompanyName);
-  const viesAddress = normalize(invoiceRequest?.viesAddress);
-  const needsManualReview =
-    normalize(invoiceRequest?.status) === "pending_review" ||
-    (yes(viesChecked) && viesValid === "false")
-      ? "true"
-      : "false";
-
   const reverseCharge =
     getAttrFromPairs(allPairs, ["reverse_charge"]) ||
     normalize(customer?.reverseCharge?.value) ||
@@ -733,9 +707,6 @@ function buildInvoiceData({ orderPayload, orderApi, invoiceRequest }: any) {
     billingCountry,
     viesChecked,
     viesValid,
-    viesCompanyName,
-    viesAddress,
-    needsManualReview,
     reverseCharge,
     taxExemptApplied,
   };
@@ -770,7 +741,35 @@ export const action = async ({ request }: any) => {
     const invoiceRequest = await getInvoiceRequestFromDb(invoiceRequestId);
     const customerGid = getCustomerGid(orderPayload, orderApi);
 
+    console.log("[orders/create] Invoice detection", {
+      orderGid,
+      orderName: orderApi?.name || orderPayload?.name || "",
+      invoiceRequested,
+      invoiceRequestId,
+      webhookAttributes: webhookPairs.map((item: any) => ({
+        key: readPairKey(item),
+        hasValue: Boolean(readPairValue(item)),
+      })),
+      customAttributes: apiPairs.map((item: any) => ({
+        key: readPairKey(item),
+        hasValue: Boolean(readPairValue(item)),
+      })),
+      localizationExtensions: (orderApi?.localizationExtensions?.nodes || []).map((item: any) => ({
+        countryCode: item?.countryCode,
+        key: item?.key,
+        title: item?.title,
+        purpose: item?.purpose,
+        hasValue: Boolean(normalize(item?.value)),
+      })),
+      customerMetafields: (orderApi?.customer?.allMetafields?.nodes || []).map((item: any) => ({
+        namespace: item?.namespace,
+        key: item?.key,
+        hasValue: Boolean(normalize(item?.value)),
+      })),
+    });
+
     let nextNote = normalize(orderApi?.note || orderPayload?.note || "");
+    let noteCommitted = false;
     const tags: string[] = [];
 
     if (invoiceRequested) {
@@ -781,7 +780,29 @@ export const action = async ({ request }: any) => {
       });
       const fiscalNote = buildInvoiceNote(invoiceData);
 
+      console.log("[orders/create] Invoice data resolved", {
+        orderGid,
+        invoiceType: invoiceData.invoiceType,
+        invoiceRequestId: invoiceData.invoiceRequestId,
+        fiscalCodeFound: Boolean(invoiceData.fiscalCode),
+        pecFound: Boolean(invoiceData.pec),
+        sdiFound: Boolean(invoiceData.codiceDestinatario),
+        vatFound: Boolean(invoiceData.vatNumber),
+      });
+
       nextNote = replaceBlock(nextNote, fiscalNote, INVOICE_START, INVOICE_END);
+
+      if (
+        nextNote &&
+        nextNote !== normalize(orderApi?.note || orderPayload?.note || "")
+      ) {
+        try {
+          await updateOrderNote(admin, orderGid, nextNote);
+          noteCommitted = true;
+        } catch (error) {
+          console.error("Invoice order note update failed:", error);
+        }
+      }
 
       if (invoiceData.invoiceRequestId) {
         await db.invoiceRequest.updateMany({
@@ -804,46 +825,54 @@ export const action = async ({ request }: any) => {
         });
       }
 
-      await setMetafields(admin, orderGid, {
-        "invoice.request_id": invoiceData.invoiceRequestId,
-        "invoice.source": "cart_invoice_request",
-        "invoice.invoice_type": invoiceData.invoiceType,
-        "invoice.company_name": invoiceData.companyName,
-        "invoice.vat_number": invoiceData.vatNumber,
-        "invoice.billing_country": invoiceData.billingCountry,
-        "invoice.fiscal_code": invoiceData.fiscalCode,
-        "invoice.pec": invoiceData.pec,
-        "invoice.codice_destinatario": invoiceData.codiceDestinatario,
-        "invoice.vies_checked": invoiceData.viesChecked,
-        "invoice.vies_valid": invoiceData.viesValid,
-        "invoice.vies_company_name": invoiceData.viesCompanyName,
-        "invoice.vies_address": invoiceData.viesAddress,
-        "invoice.needs_manual_review": invoiceData.needsManualReview,
-        "invoice.reverse_charge": invoiceData.reverseCharge,
-        "invoice.tax_exempt_applied": invoiceData.taxExemptApplied,
-        "invoice.fiscal_note": fiscalNote,
-      });
+      try {
+        await setMetafields(admin, orderGid, {
+          "invoice.request_id": invoiceData.invoiceRequestId,
+          "invoice.invoice_type": invoiceData.invoiceType,
+          "invoice.company_name": invoiceData.companyName,
+          "invoice.vat_number": invoiceData.vatNumber,
+          "invoice.billing_country": invoiceData.billingCountry,
+          "invoice.fiscal_code": invoiceData.fiscalCode,
+          "invoice.pec": invoiceData.pec,
+          "invoice.codice_destinatario": invoiceData.codiceDestinatario,
+          "invoice.vies_checked": invoiceData.viesChecked,
+          "invoice.vies_valid": invoiceData.viesValid,
+          "invoice.reverse_charge": invoiceData.reverseCharge,
+          "invoice.tax_exempt_applied": invoiceData.taxExemptApplied,
+          "invoice.fiscal_note": fiscalNote,
+        });
+      } catch (error) {
+        console.error("Invoice order metafields failed:", error);
+      }
 
       if (customerGid) {
-        await setMetafields(admin, customerGid, {
-          "custom.fiscal_code": invoiceData.fiscalCode,
-          "custom.pec": invoiceData.pec,
-          "custom.sdi": invoiceData.codiceDestinatario,
-          "custom.vat_number": invoiceData.vatNumber,
-          "custom.invoice_country_code": invoiceData.billingCountry,
-          "custom.company_name": invoiceData.companyName,
-          "custom.invoice_type": invoiceData.invoiceType,
-          "custom.vies_checked": invoiceData.viesChecked,
-          "custom.vies_valid": invoiceData.viesValid,
-          "custom.reverse_charge": invoiceData.reverseCharge,
-        });
+        try {
+          await setMetafields(admin, customerGid, {
+            "custom.fiscal_code": invoiceData.fiscalCode,
+            "custom.pec": invoiceData.pec,
+            "custom.sdi": invoiceData.codiceDestinatario,
+            "custom.vat_number": invoiceData.vatNumber,
+            "custom.invoice_country_code": invoiceData.billingCountry,
+            "custom.company_name": invoiceData.companyName,
+            "custom.invoice_type": invoiceData.invoiceType,
+            "custom.vies_checked": invoiceData.viesChecked,
+            "custom.vies_valid": invoiceData.viesValid,
+            "custom.reverse_charge": invoiceData.reverseCharge,
+          });
+        } catch (error) {
+          console.error("Invoice customer metafields failed:", error);
+        }
 
-        await updateCustomerIdentityFromCheckout(
-          admin,
-          customerGid,
-          orderApi,
-          invoiceData,
-        );
+        try {
+          await updateCustomerIdentityFromCheckout(
+            admin,
+            customerGid,
+            orderApi,
+            invoiceData,
+          );
+        } catch (error) {
+          console.error("Invoice customer identity update failed:", error);
+        }
       }
 
       const b2bMetaForCompany = getB2BMeta(orderApi);
@@ -851,12 +880,16 @@ export const action = async ({ request }: any) => {
         orderApi,
         b2bMetaForCompany,
       );
-      await updateCompanyNameFromCheckout(
-        admin,
-        customerCompany.id,
-        customerCompany.name,
-        invoiceData,
-      );
+      try {
+        await updateCompanyNameFromCheckout(
+          admin,
+          customerCompany.id,
+          customerCompany.name,
+          invoiceData,
+        );
+      } catch (error) {
+        console.error("Invoice company name update failed:", error);
+      }
 
       tags.push("invoice_request");
       if (yes(invoiceData.reverseCharge)) tags.push("reverse_charge");
@@ -868,42 +901,51 @@ export const action = async ({ request }: any) => {
         const b2bNote = buildB2BFiscalNote(orderApi, b2bMeta);
         nextNote = replaceBlock(nextNote, b2bNote, B2B_START, B2B_END);
 
-        const b2bCompanyId = getB2BCompanyId(orderApi, b2bMeta);
-        const b2bCompanyName = getB2BCompanyName(orderApi, b2bMeta);
-        const b2bReverseCharge = getB2BReverseCharge(b2bMeta);
-        const b2bTaxExempt = getB2BTaxExempt(b2bMeta);
-
-        await setMetafields(admin, orderGid, {
-          "b2b.is_b2b": "true",
-          "b2b.source": "b2b_form",
-          "b2b.company_id": b2bCompanyId,
-          "b2b.company_location_id": b2bMeta.company_location_id || "",
-          "b2b.vat_number": b2bMeta.vat_number || "",
-          "b2b.billing_country": b2bMeta.billing_country || "",
-          "b2b.company_name_submitted": b2bMeta.company_name_submitted || b2bCompanyName,
-          "b2b.vies_company_name": b2bMeta.vies_company_name || "",
-          "b2b.vies_address": b2bMeta.vies_address || "",
-          "b2b.pec": b2bMeta.pec || "",
-          "b2b.codice_destinatario": b2bMeta.codice_destinatario || "",
-          "b2b.vies_status": b2bMeta.vies_status || "",
-          "b2b.vies_match_score": b2bMeta.vies_match_score || "",
-          "b2b.reverse_charge": b2bReverseCharge,
-          "b2b.tax_exempt": b2bTaxExempt,
-          "b2b.fiscal_note": b2bNote,
-        });
+        try {
+          await setMetafields(admin, orderGid, {
+            "b2b.is_b2b": "true",
+            "b2b.source": "b2b_form",
+            "b2b.company_id": b2bMeta.company_id || "",
+            "b2b.company_location_id": b2bMeta.company_location_id || "",
+            "b2b.vat_number": b2bMeta.vat_number || "",
+            "b2b.billing_country": b2bMeta.billing_country || "",
+            "b2b.company_name_submitted": b2bMeta.company_name_submitted || "",
+            "b2b.vies_company_name": b2bMeta.vies_company_name || "",
+            "b2b.vies_address": b2bMeta.vies_address || "",
+            "b2b.pec": b2bMeta.pec || "",
+            "b2b.codice_destinatario": b2bMeta.codice_destinatario || "",
+            "b2b.vies_status": b2bMeta.vies_status || "",
+            "b2b.vies_match_score": b2bMeta.vies_match_score || "",
+            "b2b.reverse_charge": normalize(b2bMeta.billing_country).toUpperCase() && normalize(b2bMeta.billing_country).toUpperCase() !== "IT" ? "true" : "false",
+            "b2b.tax_exempt": normalize(b2bMeta.billing_country).toUpperCase() && normalize(b2bMeta.billing_country).toUpperCase() !== "IT" ? "true" : "false",
+            "b2b.fiscal_note": b2bNote,
+          });
+        } catch (error) {
+          console.error("B2B order metafields failed:", error);
+        }
 
         tags.push("b2b_customer_order", "b2b_fiscal_data");
       }
     }
 
     if (
+      !noteCommitted &&
       nextNote &&
       nextNote !== normalize(orderApi?.note || orderPayload?.note || "")
     ) {
-      await updateOrderNote(admin, orderGid, nextNote);
+      try {
+        await updateOrderNote(admin, orderGid, nextNote);
+        noteCommitted = true;
+      } catch (error) {
+        console.error("Order note update failed:", error);
+      }
     }
 
-    await addOrderTags(admin, orderGid, tags);
+    try {
+      await addOrderTags(admin, orderGid, tags);
+    } catch (error) {
+      console.error("Order tags update failed:", error);
+    }
 
     return new Response("OK");
   } catch (error) {
