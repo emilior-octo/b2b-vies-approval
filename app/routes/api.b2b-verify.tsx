@@ -248,6 +248,12 @@ async function findCustomerByEmail(admin: any, email: string) {
               company {
                 id
                 name
+                locations(first: 10) {
+                  nodes {
+                    id
+                    name
+                  }
+                }
               }
             }
           }
@@ -275,6 +281,12 @@ async function createCustomer(admin: any, payload: any, tagsToApply: string[]) {
               company {
                 id
                 name
+                locations(first: 10) {
+                  nodes {
+                    id
+                    name
+                  }
+                }
               }
             }
           }
@@ -469,6 +481,8 @@ async function createCompanyForApprovedCustomer({
 }) {
   const existingCompany =
     customer?.companyContactProfiles?.[0]?.company ?? null;
+  const existingCompanyLocation =
+    existingCompany?.locations?.nodes?.[0] ?? null;
 
   if (existingCompany?.id) {
     return {
@@ -476,6 +490,8 @@ async function createCompanyForApprovedCustomer({
       reason: "Customer already assigned to a company.",
       companyId: existingCompany.id,
       companyName: existingCompany.name,
+      companyLocationId: existingCompanyLocation?.id || "",
+      companyLocationName: existingCompanyLocation?.name || "",
     };
   }
 
@@ -720,6 +736,15 @@ async function upsertCustomerAndWriteData({
       vies,
       billingValidation,
     });
+
+    const companyMetafieldsToWrite: Record<string, string> = {
+      "b2b.company_id": company?.companyId || "",
+      "b2b.company_location_id": company?.companyLocationId || "",
+    };
+
+    if (companyMetafieldsToWrite["b2b.company_id"] || companyMetafieldsToWrite["b2b.company_location_id"]) {
+      await setCustomerMetafields(admin, customer.id, companyMetafieldsToWrite);
+    }
   }
 
   return {
