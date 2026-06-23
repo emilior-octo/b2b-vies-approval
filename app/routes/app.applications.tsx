@@ -95,6 +95,42 @@ export async function action({ request }: any) {
     throw new Response("Missing application id", { status: 400 });
   }
 
+  if (intent === "save_edits") {
+    const application = await db.b2BApplication.findUnique({ where: { id } });
+
+    if (!application) {
+      throw new Response("Application not found", { status: 404 });
+    }
+
+    const operatorNote = "Dati richiesta modificati manualmente dall'operatore.";
+
+    await db.b2BApplication.update({
+      where: { id },
+      data: {
+        companyNameSubmitted: cleanText(formData.get("companyNameSubmitted")),
+        email: cleanText(formData.get("email")),
+        firstName: cleanText(formData.get("firstName")),
+        lastName: cleanText(formData.get("lastName")),
+        vatNumberSubmitted: cleanUpper(formData.get("vatNumberSubmitted")),
+        billingCountry: cleanUpper(formData.get("billingCountry")),
+        pec: cleanText(formData.get("pec")),
+        codiceDestinatario: cleanText(formData.get("codiceDestinatario")),
+        viesValid: cleanViesValid(formData.get("viesValid")),
+        viesCompanyName: cleanText(formData.get("viesCompanyName")),
+        viesCountryCode: cleanUpper(formData.get("viesCountryCode")),
+        viesVatNumber: cleanUpper(formData.get("viesVatNumber")),
+        matchScore: cleanMatchScore(formData.get("matchScore")),
+        viesAddress: cleanText(formData.get("viesAddress")),
+        shopifyCustomerId: cleanText(formData.get("shopifyCustomerId")),
+        shopifyCompanyId: cleanText(formData.get("shopifyCompanyId")),
+        shopifyCompanyLocationId: cleanText(formData.get("shopifyCompanyLocationId")),
+        reviewNotes: appendNote(cleanText(formData.get("reviewNotes")), operatorNote),
+      },
+    });
+
+    return null;
+  }
+
   if (intent === "delete") {
     await db.b2BApplication.delete({ where: { id } });
     return null;
@@ -487,6 +523,141 @@ export default function ApplicationsPage() {
                     </section>
                   </div>
 
+                  <section className="zbe-edit-card">
+                    <div className="zbe-edit-head">
+                      <div>
+                        <h2>Modifica richiesta</h2>
+                        <p>
+                          Corregge i dati salvati nell'app. Non modifica automaticamente customer/company Shopify già creati.
+                        </p>
+                      </div>
+                    </div>
+
+                    <Form method="post" className="zbe-edit-form">
+                      <input type="hidden" name="id" value={app.id} />
+                      <input type="hidden" name="intent" value="save_edits" />
+
+                      <label>
+                        Azienda inserita
+                        <input name="companyNameSubmitted" defaultValue={app.companyNameSubmitted || ""} />
+                      </label>
+
+                      <label>
+                        Email
+                        <input name="email" type="email" defaultValue={app.email || ""} />
+                      </label>
+
+                      <label>
+                        Nome
+                        <input name="firstName" defaultValue={app.firstName || ""} />
+                      </label>
+
+                      <label>
+                        Cognome
+                        <input name="lastName" defaultValue={app.lastName || ""} />
+                      </label>
+
+                      <label>
+                        Partita IVA / VAT
+                        <input name="vatNumberSubmitted" defaultValue={app.vatNumberSubmitted || ""} />
+                      </label>
+
+                      <label>
+                        Paese fatturazione
+                        <input name="billingCountry" maxLength={2} defaultValue={app.billingCountry || ""} />
+                      </label>
+
+                      <label>
+                        PEC
+                        <input name="pec" defaultValue={app.pec || ""} />
+                      </label>
+
+                      <label>
+                        Codice destinatario / SDI
+                        <input name="codiceDestinatario" defaultValue={app.codiceDestinatario || ""} />
+                      </label>
+
+                      <label>
+                        Validità VIES
+                        <select
+                          name="viesValid"
+                          defaultValue={
+                            app.viesValid === true
+                              ? "true"
+                              : app.viesValid === false
+                                ? "false"
+                                : ""
+                          }
+                        >
+                          <option value="">Non controllato</option>
+                          <option value="true">Valido</option>
+                          <option value="false">Non valido</option>
+                        </select>
+                      </label>
+
+                      <label>
+                        Azienda VIES
+                        <input name="viesCompanyName" defaultValue={app.viesCompanyName || ""} />
+                      </label>
+
+                      <label>
+                        Paese VIES
+                        <input name="viesCountryCode" maxLength={2} defaultValue={app.viesCountryCode || ""} />
+                      </label>
+
+                      <label>
+                        VAT VIES
+                        <input name="viesVatNumber" defaultValue={app.viesVatNumber || ""} />
+                      </label>
+
+                      <label>
+                        Match %
+                        <input
+                          name="matchScore"
+                          type="number"
+                          min="0"
+                          max="100"
+                          defaultValue={
+                            app.matchScore === null || app.matchScore === undefined
+                              ? ""
+                              : app.matchScore
+                          }
+                        />
+                      </label>
+
+                      <label>
+                        Customer ID Shopify
+                        <input name="shopifyCustomerId" defaultValue={app.shopifyCustomerId || ""} />
+                      </label>
+
+                      <label>
+                        Company ID Shopify
+                        <input name="shopifyCompanyId" defaultValue={app.shopifyCompanyId || ""} />
+                      </label>
+
+                      <label>
+                        Location ID Shopify
+                        <input name="shopifyCompanyLocationId" defaultValue={app.shopifyCompanyLocationId || ""} />
+                      </label>
+
+                      <label className="zbe-edit-wide">
+                        Indirizzo VIES
+                        <textarea name="viesAddress" defaultValue={app.viesAddress || ""} />
+                      </label>
+
+                      <label className="zbe-edit-wide">
+                        Note revisione
+                        <textarea name="reviewNotes" defaultValue={app.reviewNotes || ""} />
+                      </label>
+
+                      <div className="zbe-edit-submit zbe-edit-wide">
+                        <button className="zbe-button zbe-button--green" type="submit">
+                          Salva modifiche
+                        </button>
+                      </div>
+                    </Form>
+                  </section>
+
                   <section className="zbe-actions">
                     {canApproveStatusOnly && (
                       <Form method="post">
@@ -829,6 +1000,68 @@ const styles = `
   margin: 0;
 }
 
+
+.zbe-edit-card {
+  margin-top: 18px;
+  background: #fffdf5;
+  border: 1px solid rgba(57,65,34,.14);
+  border-radius: 22px;
+  padding: 18px;
+}
+
+.zbe-edit-head h2 {
+  margin: 0;
+  font-size: 24px;
+}
+
+.zbe-edit-head p {
+  margin: 6px 0 0;
+  color: rgba(37,48,24,.68);
+  line-height: 1.35;
+}
+
+.zbe-edit-form {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.zbe-edit-form label {
+  display: grid;
+  gap: 6px;
+  font-weight: 900;
+  font-size: 13px;
+  color: rgba(37,48,24,.82);
+}
+
+.zbe-edit-form input,
+.zbe-edit-form select,
+.zbe-edit-form textarea {
+  width: 100%;
+  border: 1px solid rgba(57,65,34,.18);
+  border-radius: 14px;
+  padding: 11px 12px;
+  background: white;
+  color: #253018;
+  font: inherit;
+  font-weight: 600;
+}
+
+.zbe-edit-form textarea {
+  min-height: 86px;
+  resize: vertical;
+}
+
+.zbe-edit-wide {
+  grid-column: 1 / -1;
+}
+
+.zbe-edit-submit {
+  display: flex;
+  justify-content: flex-end;
+}
+
 .zbe-actions {
   margin-top: 16px;
   background: white;
@@ -899,6 +1132,18 @@ const styles = `
 
   .zbe-actions {
     display: grid;
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 980px) {
+  .zbe-edit-form {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 640px) {
+  .zbe-edit-form {
     grid-template-columns: 1fr;
   }
 }
