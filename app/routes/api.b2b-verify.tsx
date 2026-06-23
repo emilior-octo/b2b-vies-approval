@@ -7,7 +7,8 @@ const VIES_WSDL =
   "https://ec.europa.eu/taxation_customs/vies/checkVatService.wsdl";
 
 const AUTO_APPROVE_MATCH_THRESHOLD = 70;
-const DEFAULT_SHOP = "buzz-hive-store.myshopify.com";
+const DEFAULT_SHOP = "zig-italia-frutta-secca-e-semi.myshopify.com";
+const VIES_NAME_UNAVAILABLE_COUNTRIES = ["DE", "ES"];
 
 const MANAGED_B2B_TAGS = [
   "b2b_pending_review",
@@ -39,6 +40,34 @@ function normalizeVat(vatNumber: string) {
     .replace(/\s+/g, "")
     .replace(/[.\-_/]/g, "")
     .toUpperCase();
+}
+
+function cleanViesValue(value: string) {
+  const text = String(value || "").trim();
+  if (!text || text === "---" || text === "--" || text === "-") return "";
+  return text;
+}
+
+function normalizeVatForCountry(vatNumber: string, billingCountry?: string) {
+  let raw = normalizeVat(vatNumber);
+  const country = normalizeCountry(billingCountry || "");
+
+  if (!raw) return raw;
+
+  const hasCountryPrefix = /^[A-Z]{2}/.test(raw);
+
+  if (!hasCountryPrefix && country) {
+    raw = `${country}${raw}`;
+  }
+
+  if (country === "AT") {
+    if (/^ATU/.test(raw)) return raw;
+    if (/^AT/.test(raw)) return `ATU${raw.slice(2).replace(/^U/, "")}`;
+    if (/^U/.test(raw)) return `AT${raw}`;
+    return `ATU${raw}`;
+  }
+
+  return raw;
 }
 
 function normalizeCountry(country: string) {
@@ -147,8 +176,8 @@ async function checkVatVies(vatNumber: string) {
 
   return {
     valid: Boolean(result.valid),
-    companyName: result.name || "",
-    address: result.address || "",
+    companyName: cleanViesValue(result.name || ""),
+    address: cleanViesValue(result.address || ""),
     countryCode,
     vatNumber: normalized,
   };
@@ -334,6 +363,42 @@ async function syncB2BTags(
   }
 }
 
+async function updateCustomerTaxExempt(admin: any, customerId: string, taxExempt: boolean) {
+  if (!customerId) return null;
+
+  const data = await graphQL(
+    admin,
+    `#graphql
+      mutation CustomerUpdateTaxExempt($input: CustomerInput!) {
+        customerUpdate(input: $input) {
+          customer {
+            id
+            email
+            taxExempt
+          }
+          userErrors {
+            field
+            message
+          }
+        }
+      }
+    `,
+    {
+      input: {
+        id: customerId,
+        taxExempt,
+      },
+    },
+  );
+
+  const errors = data?.data?.customerUpdate?.userErrors ?? [];
+  if (errors.length) {
+    throw new Error(errors.map((e: any) => e.message).join(" | "));
+  }
+
+  return data?.data?.customerUpdate?.customer ?? null;
+}
+
 async function setCustomerMetafields(
   admin: any,
   customerId: string,
@@ -415,7 +480,7 @@ async function createCompanyForApprovedCustomer({
   }
 
   const companyName =
-    String(vies.companyName || "").trim() ||
+    cleanViesValue(vies.companyName || "") ||
     String(payload.companyName || "").trim();
 
   if (!companyName) {
@@ -460,13 +525,16 @@ async function createCompanyForApprovedCustomer({
         },
         companyLocation: {
           name: companyName,
-          taxRegistrationId: normalizeVat(vies.vatNumber || payload.vatNumber),
-          taxExempt: false,
+          taxRegistrationId: normalizeVatForCountry(
+            vies.vatNumber || payload.vatNumber,
+            billingValidation.billingCountry,
+          ),
+          taxExempt: billingValidation.billingCountry !== "IT",
           billingAddress: {
             recipient: companyName,
             address1:
-              String(vies.address || "Address from VIES").split("\n")[0] ||
-              "Address from VIES",
+              cleanViesValue(vies.address || "").split("\n")[0] ||
+              "Indirizzo non disponibile da VIES",
             city: "N/A",
             countryCode:
               billingValidation.billingCountry || vies.countryCode || "IT",
@@ -635,6 +703,16 @@ async function upsertCustomerAndWriteData({
       throw new Error("Approved customer was not found after creation/update.");
     }
 
+    if (billingValidation.billingCountry !== "IT") {
+      const taxExemptCustomer = await updateCustomerTaxExempt(
+        admin,
+        customer.id,
+        true,
+      );
+
+      customer = taxExemptCustomer || customer;
+    }
+
     company = await createCompanyForApprovedCustomer({
       admin,
       customer,
@@ -703,7 +781,7 @@ export async function action({ request }: ActionFunctionArgs) {
 
   const shop = String(payload.shop || DEFAULT_SHOP).trim();
   const submittedCompanyName = payload.companyName ?? "";
-  const vatNumber = payload.vatNumber ?? "";
+  const vatNumber = normalizeVatForCountry(payload.vatNumber ?? "", billingValidation.billingCountry);
   const email = String(payload.email || "").trim();
 
   if (!email) {
@@ -720,19 +798,31 @@ export async function action({ request }: ActionFunctionArgs) {
 
   try {
     const vies = await checkVatVies(vatNumber);
+    const viesCompanyName = cleanViesValue(vies.companyName || "");
+    const viesAddress = cleanViesValue(vies.address || "");
+    const acceptsMissingViesName =
+      VIES_NAME_UNAVAILABLE_COUNTRIES.includes(vies.countryCode);
 
-    const matchScore = calculateMatchScore(
-      submittedCompanyName,
-      vies.companyName,
-    );
+    const matchScore = viesCompanyName
+      ? calculateMatchScore(submittedCompanyName, viesCompanyName)
+      : null;
 
     let decision = "pending_review";
     let tagsToApply = ["b2b_pending_review"];
+    let viesStatus = vies.valid ? "valid" : "invalid";
 
     if (!vies.valid) {
       decision = "rejected";
       tagsToApply = ["b2b_rejected"];
-    } else if (matchScore >= AUTO_APPROVE_MATCH_THRESHOLD) {
+    } else if (!viesCompanyName && acceptsMissingViesName) {
+      decision = "approved";
+      tagsToApply = [
+        "b2b_customer",
+        "vat_verified",
+        "b2b_auto_approved",
+      ];
+      viesStatus = "valid_name_unavailable";
+    } else if ((matchScore ?? 0) >= AUTO_APPROVE_MATCH_THRESHOLD) {
       decision = "approved";
       tagsToApply = [
         "b2b_customer",
@@ -745,10 +835,10 @@ export async function action({ request }: ActionFunctionArgs) {
       "b2b.pec": billingValidation.pec,
       "b2b.codice_destinatario": billingValidation.codiceDestinatario,
       "b2b.vat_number": normalizeVat(vatNumber),
-      "b2b.vies_company_name": vies.companyName,
-      "b2b.vies_address": vies.address,
-      "b2b.vies_match_score": String(matchScore),
-      "b2b.vies_status": vies.valid ? "valid" : "invalid",
+      "b2b.vies_company_name": viesCompanyName,
+      "b2b.vies_address": viesAddress,
+      "b2b.vies_match_score": matchScore === null ? "" : String(matchScore),
+      "b2b.vies_status": viesStatus,
       "b2b.verified_at": new Date().toISOString(),
       "b2b.company_name_submitted": submittedCompanyName,
       "b2b.billing_country": billingValidation.billingCountry,
@@ -767,11 +857,11 @@ export async function action({ request }: ActionFunctionArgs) {
         pec: billingValidation.pec || null,
         codiceDestinatario: billingValidation.codiceDestinatario || null,
         viesValid: vies.valid,
-        viesCompanyName: vies.companyName,
-        viesAddress: vies.address,
+        viesCompanyName: viesCompanyName || submittedCompanyName,
+        viesAddress: viesAddress,
         viesCountryCode: vies.countryCode,
         viesVatNumber: vies.vatNumber,
-        matchScore,
+        matchScore: matchScore ?? null,
         approvedAt: decision === "approved" ? new Date() : null,
         rejectedAt: decision === "rejected" ? new Date() : null,
       },
@@ -801,7 +891,6 @@ export async function action({ request }: ActionFunctionArgs) {
       ok: true,
       applicationId: b2bApplication.id,
       decision,
-      isLegacyImport,
       matchScore,
       tagsToApply,
       submitted: {
@@ -812,7 +901,7 @@ export async function action({ request }: ActionFunctionArgs) {
       vies,
       normalized: {
         submittedCompanyName: normalizeCompanyName(submittedCompanyName),
-        viesCompanyName: normalizeCompanyName(vies.companyName),
+        viesCompanyName: normalizeCompanyName(viesCompanyName),
       },
       shopify: {
         customerId: shopifyWrite.customer?.id,
@@ -822,24 +911,48 @@ export async function action({ request }: ActionFunctionArgs) {
       },
     });
   } catch (error: any) {
+    const errorMessage = error?.message || "Errore imprevisto.";
+
     if (b2bApplication?.id) {
       await db.b2BApplication.update({
         where: { id: b2bApplication.id },
         data: {
           status: "pending_review",
-          reviewNotes: error?.message || "Errore imprevisto.",
+          reviewNotes: errorMessage,
         },
       });
+    } else {
+      try {
+        b2bApplication = await db.b2BApplication.create({
+          data: {
+            shop,
+            status: "pending_review",
+            email,
+            firstName: payload.firstName || null,
+            lastName: payload.lastName || null,
+            companyNameSubmitted: submittedCompanyName || "",
+            vatNumberSubmitted: normalizeVat(vatNumber || payload.vatNumber || ""),
+            billingCountry: billingValidation.billingCountry || null,
+            pec: billingValidation.pec || null,
+            codiceDestinatario: billingValidation.codiceDestinatario || null,
+            reviewNotes: errorMessage,
+          },
+        });
+      } catch (dbError) {
+        console.error("Could not persist pending B2B application after error:", dbError);
+      }
     }
 
     return json(
       {
-        ok: false,
+        ok: true,
         decision: "pending_review",
         applicationId: b2bApplication?.id || null,
-        error: error?.message || "Errore imprevisto.",
+        error: errorMessage,
+        message:
+          "Richiesta salvata per revisione manuale. Il nostro team controllerà i dati prima di approvare l'accesso B2B.",
       },
-      { status: 500 },
+      { status: 200 },
     );
   }
 }
