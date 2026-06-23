@@ -4,6 +4,7 @@ import { authenticate } from "../shopify.server";
 import db from "../db.server";
 
 type InvoiceStatus = "registered" | "completed" | "rejected" | "pending_review";
+type InvoiceUiStatus = "registered" | "manual_review" | "incomplete" | "completed" | "rejected";
 
 export async function loader({ request }: any) {
   await authenticate.admin(request);
@@ -18,24 +19,30 @@ export async function loader({ request }: any) {
     take: 250,
   });
 
-  const [total, inviate, completate, rifiutate, reverseCharge] = await Promise.all([
+  const [total, completate, rifiutate, reverseCharge] = await Promise.all([
     db.invoiceRequest.count({ where: baseWhere }),
-    db.invoiceRequest.count({
-      where: {
-        ...baseWhere,
-        OR: [{ status: "registered" }, { status: "pending_review" }],
-      },
-    }),
     db.invoiceRequest.count({ where: { ...baseWhere, status: "completed" } }),
     db.invoiceRequest.count({ where: { ...baseWhere, status: "rejected" } }),
     db.invoiceRequest.count({ where: { ...baseWhere, reverseCharge: true } }),
   ]);
 
+  const enrichedRequests = invoiceRequests.map((item: any) => ({
+    ...item,
+    uiStatus: getInvoiceUiStatus(item),
+    missingFieldsList: missingFields(item),
+  }));
+
+  const inviate = enrichedRequests.filter((item: any) => item.uiStatus === "registered").length;
+  const manualReview = enrichedRequests.filter((item: any) => item.uiStatus === "manual_review").length;
+  const incomplete = enrichedRequests.filter((item: any) => item.uiStatus === "incomplete").length;
+
   return {
-    invoiceRequests,
+    invoiceRequests: enrichedRequests,
     stats: {
       total,
       inviate,
+      manualReview,
+      incomplete,
       completate,
       rifiutate,
       reverseCharge,
@@ -84,7 +91,7 @@ export async function action({ request }: any) {
     return null;
   }
 
-  if (["registered", "completed", "rejected"].includes(intent)) {
+  if (["registered", "pending_review", "completed", "rejected"].includes(intent)) {
     await db.invoiceRequest.update({
       where: { id },
       data: {
@@ -107,24 +114,50 @@ function formatDate(value: string | Date) {
   return new Date(value).toLocaleString("it-IT");
 }
 
-function normalizeStatus(status: string): "registered" | "completed" | "rejected" {
-  if (status === "completed") return "completed";
-  if (status === "rejected") return "rejected";
+function getInvoiceUiStatus(item: any): InvoiceUiStatus {
+  if (item.status === "completed") return "completed";
+  if (item.status === "rejected") return "rejected";
+
+  const missing = item.missingFieldsList || missingFields(item);
+  const hasBlockingMissingFields = missing.some((field) => field !== "VIES non valido/da controllare");
+
+  if (hasBlockingMissingFields) return "incomplete";
+  if (item.status === "pending_review") return "manual_review";
+  if (item.invoiceType === "company" && String(item.billingCountry || "").toUpperCase() !== "IT" && item.viesValid === false) {
+    return "manual_review";
+  }
+
   return "registered";
 }
 
-function statusLabel(status: string) {
-  const normalized = normalizeStatus(status);
-  if (normalized === "completed") return "Completata";
+function normalizeStatus(itemOrStatus: any): InvoiceUiStatus {
+  if (typeof itemOrStatus === "object" && itemOrStatus) {
+    return itemOrStatus.uiStatus || getInvoiceUiStatus(itemOrStatus);
+  }
+
+  if (itemOrStatus === "completed") return "completed";
+  if (itemOrStatus === "rejected") return "rejected";
+  if (itemOrStatus === "pending_review" || itemOrStatus === "manual_review") return "manual_review";
+  if (itemOrStatus === "incomplete") return "incomplete";
+  return "registered";
+}
+
+function statusLabel(itemOrStatus: any) {
+  const normalized = normalizeStatus(itemOrStatus);
+  if (normalized === "completed") return "🟢 Approvata";
   if (normalized === "rejected") return "Rifiutata";
+  if (normalized === "manual_review") return "🟡 Verifica manuale";
+  if (normalized === "incomplete") return "🔴 Incompleta";
   return "Inviata";
 }
 
-function statusTone(status: string): "success" | "danger" | "warning" {
-  const normalized = normalizeStatus(status);
+function statusTone(itemOrStatus: any): "success" | "danger" | "warning" | "info" {
+  const normalized = normalizeStatus(itemOrStatus);
   if (normalized === "completed") return "success";
   if (normalized === "rejected") return "danger";
-  return "warning";
+  if (normalized === "incomplete") return "danger";
+  if (normalized === "manual_review") return "warning";
+  return "info";
 }
 
 function requestType(item: any) {
@@ -230,7 +263,7 @@ export default function InvoiceRequestsPage() {
     const q = query.trim().toLowerCase();
 
     return invoiceRequests.filter((item) => {
-      const normalizedStatus = normalizeStatus(item.status);
+      const normalizedStatus = normalizeStatus(item);
       const matchesStatus =
         statusFilter === "all" || normalizedStatus === statusFilter;
 
@@ -283,7 +316,9 @@ export default function InvoiceRequestsPage() {
 
       <section className="zi-stats">
         <Stat label="Totale" value={stats.total} />
-        <Stat label="Inviate" value={stats.inviate} tone="warning" />
+        <Stat label="Inviate" value={stats.inviate} tone="info" />
+        <Stat label="Verifica manuale" value={stats.manualReview} tone="warning" />
+        <Stat label="Incomplete" value={stats.incomplete} tone="danger" />
         <Stat label="Completate" value={stats.completate} tone="success" />
         <Stat label="Rifiutate" value={stats.rifiutate} tone="danger" />
         <Stat label="Reverse charge" value={stats.reverseCharge} tone="info" />
@@ -302,6 +337,8 @@ export default function InvoiceRequestsPage() {
         >
           <option value="all">Tutti gli stati</option>
           <option value="registered">Inviata</option>
+          <option value="manual_review">Verifica manuale</option>
+          <option value="incomplete">Incompleta</option>
           <option value="completed">Completata</option>
           <option value="rejected">Rifiutata</option>
         </select>
@@ -320,14 +357,14 @@ export default function InvoiceRequestsPage() {
       <section className="zi-list">
         {filtered.map((item) => {
           const type = requestType(item);
-          const missing = missingFields(item);
+          const missing = item.missingFieldsList || missingFields(item);
           const isOpen = openId === item.id;
 
           return (
             <article key={item.id} className="zi-request-card">
               <div className="zi-summary">
                 <div className="zi-summary-badges">
-                  <Badge tone={statusTone(item.status)}>{statusLabel(item.status)}</Badge>
+                  <Badge tone={statusTone(item)}>{statusLabel(item)}</Badge>
                   <Badge tone={type.tone}>
                     {type.icon} {type.label}
                   </Badge>
@@ -363,9 +400,15 @@ export default function InvoiceRequestsPage() {
               </div>
 
               {missing.length > 0 ? (
-                <div className="zi-warning">
-                  <strong>Da controllare:</strong> {missing.join(" · ")}
-                </div>
+                normalizeStatus(item) === "incomplete" ? (
+                  <div className="zi-danger-box">
+                    <strong>Richiesta incompleta:</strong> {missing.join(" · ")}
+                  </div>
+                ) : (
+                  <div className="zi-warning">
+                    <strong>Verifica manuale:</strong> {missing.join(" · ")}
+                  </div>
+                )
               ) : (
                 <div className="zi-complete">
                   <strong>Dati completi</strong>
@@ -482,8 +525,12 @@ export default function InvoiceRequestsPage() {
                           Salva modifiche
                         </button>
 
-                        <button name="intent" value="registered" className="zi-button zi-button-yellow">
+                        <button name="intent" value="registered" className="zi-button zi-button-blue">
                           Segna inviata
+                        </button>
+
+                        <button name="intent" value="pending_review" className="zi-button zi-button-yellow">
+                          Segna verifica manuale
                         </button>
 
                         <button name="intent" value="completed" className="zi-button zi-button-green">
@@ -617,7 +664,7 @@ function Style() {
 
       .zi-stats {
         display: grid;
-        grid-template-columns: repeat(5, minmax(0, 1fr));
+        grid-template-columns: repeat(7, minmax(0, 1fr));
         gap: 12px;
         margin-top: 20px;
       }
@@ -745,6 +792,7 @@ function Style() {
       }
 
       .zi-warning,
+      .zi-danger-box,
       .zi-complete {
         margin: 0 20px 20px;
         border-radius: 18px;
@@ -756,6 +804,12 @@ function Style() {
         background: #fff7dc;
         border: 1px solid #f3c24e;
         color: #5b3b05;
+      }
+
+      .zi-danger-box {
+        background: #ffe8e3;
+        border: 1px solid #ef9a8b;
+        color: #7a1f12;
       }
 
       .zi-complete {
@@ -851,6 +905,7 @@ function Style() {
       }
 
       .zi-button-grey { background: #e6e6df; color: #2f3521; }
+      .zi-button-blue { background: #2f6fed; color: white; }
       .zi-button-yellow { background: #c9902f; color: white; }
       .zi-button-green { background: #1f7a35; color: white; }
       .zi-button-red { background: #9f2f1f; color: white; }
