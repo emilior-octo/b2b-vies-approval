@@ -178,6 +178,68 @@ function cleanViesText(value: string | null | undefined) {
   return text;
 }
 
+function missingCompanyInvoiceFields({
+  invoiceType,
+  countryCode,
+  vatNumber,
+  companyName,
+  customerEmail,
+  pec,
+  sdi,
+}: {
+  invoiceType: string;
+  countryCode: string;
+  vatNumber: string;
+  companyName: string;
+  customerEmail: string;
+  pec: string;
+  sdi: string;
+}) {
+  const missing: string[] = [];
+  const isItaly = countryCode === "IT";
+
+  if (invoiceType !== "company") return missing;
+  if (!String(companyName || "").trim()) missing.push("company_name");
+  if (!String(vatNumber || "").trim()) missing.push("vat_number");
+  if (!String(countryCode || "").trim()) missing.push("country_code");
+
+  if (isItaly) {
+    if (!String(pec || "").trim() && !String(sdi || "").trim()) {
+      missing.push("pec_or_sdi");
+    }
+  } else if (!String(customerEmail || "").trim()) {
+    missing.push("customer_email");
+  }
+
+  return missing;
+}
+
+function incompleteInvoiceMessage(locale: string, missingFields: string[]) {
+  if (locale === "it") {
+    const labelMap: Record<string, string> = {
+      company_name: "ragione sociale",
+      vat_number: "Partita IVA",
+      country_code: "Paese",
+      pec_or_sdi: "PEC o Codice SDI",
+      customer_email: "email da usare al checkout",
+    };
+
+    const readable = missingFields.map((field) => labelMap[field] || field).join(", ");
+    return `Richiesta fattura incompleta. Controlla i dati mancanti: ${readable}.`;
+  }
+
+  const labelMap: Record<string, string> = {
+    company_name: "company name",
+    vat_number: "VAT number",
+    country_code: "country",
+    pec_or_sdi: "PEC or SDI code",
+    customer_email: "checkout email",
+  };
+
+  const readable = missingFields.map((field) => labelMap[field] || field).join(", ");
+  return `Incomplete invoice request. Please check the missing details: ${readable}.`;
+}
+
 async function createCompanyForInvoiceRequest({
   admin,
   customer,
@@ -365,18 +427,54 @@ export async function action({ request }: ActionFunctionArgs) {
     }
 
     const isItaly = countryCode === "IT";
+    const missingFields = missingCompanyInvoiceFields({
+      invoiceType,
+      countryCode,
+      vatNumber,
+      companyName,
+      customerEmail,
+      pec,
+      sdi,
+    });
 
-    if (!isItaly && !customerEmail) {
-      return json(
-        {
-          ok: false,
-          error:
-            locale === "it"
-              ? "Per aziende EU/estere inserisci l’email che userai al checkout."
-              : "For EU/foreign companies, enter the email you will use at checkout.",
+    if (missingFields.length) {
+      const invoiceRequest = await db.invoiceRequest.create({
+        data: {
+          shop,
+          cartToken: cartToken || null,
+          invoiceType: "company",
+          email: customerEmail || null,
+          companyName: companyName || null,
+          vatNumber: vatNumber || "",
+          billingCountry: countryCode,
+          pec: isItaly ? pec || null : null,
+          codiceDestinatario: isItaly ? sdi || null : null,
+          viesChecked: false,
+          viesValid: null,
+          reverseCharge: false,
+          taxExemptApplied: false,
+          status: "registered",
         },
-        { status: 400 },
-      );
+      });
+
+      return json({
+        ok: true,
+        invoiceRequestId: invoiceRequest.id,
+        invoiceType: "company",
+        customerEmail,
+        vatNumber,
+        countryCode,
+        viesChecked: false,
+        viesValid: null,
+        reverseCharge: false,
+        taxExemptApplied: false,
+        taxExemptCustomerPrepared: false,
+        mustUseSameEmailAtCheckout: false,
+        incompleteRequest: true,
+        missingFields,
+        validationMessage: "INCOMPLETE_INVOICE_DATA",
+        message: incompleteInvoiceMessage(locale, missingFields),
+      });
     }
 
     let viesChecked = false;
@@ -388,6 +486,7 @@ export async function action({ request }: ActionFunctionArgs) {
     let preparedCustomer: any = null;
     let status = "registered";
     let pendingManualReview = false;
+    let validationMessage: "VAT_NOT_VERIFIED" | null = null;
 
     try {
       const verification = await verifyCompanyVat({
@@ -425,6 +524,7 @@ export async function action({ request }: ActionFunctionArgs) {
       if (!viesValid) {
         status = "pending_review";
         pendingManualReview = true;
+        validationMessage = "VAT_NOT_VERIFIED";
       }
     } catch (error) {
       console.error("Invoice VIES check failed:", error);
@@ -435,6 +535,7 @@ export async function action({ request }: ActionFunctionArgs) {
       viesValid = null;
       reverseCharge = false;
       taxExemptCustomerPrepared = false;
+      validationMessage = "VAT_NOT_VERIFIED";
     }
 
     const invoiceRequest = await db.invoiceRequest.create({
@@ -520,13 +621,11 @@ export async function action({ request }: ActionFunctionArgs) {
       taxExemptApplied: taxExemptCustomerPrepared,
       taxExemptCustomerPrepared,
       mustUseSameEmailAtCheckout: Boolean(reverseCharge && customerEmail),
+      pendingReview: pendingManualReview,
       pendingManualReview,
+      validationMessage,
       company: invoiceCompany,
-      message: pendingManualReview
-        ? locale === "it"
-          ? "Richiesta salvata per verifica manuale. Controlleremo il VAT prima della fatturazione."
-          : "Invoice request saved for manual review. We will check the VAT before invoicing."
-        : undefined,
+      message: undefined,
     });
   } catch (error: any) {
     console.error("Invoice request validate error:", error);

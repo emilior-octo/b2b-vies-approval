@@ -57,6 +57,52 @@ export async function action({ request }: any) {
   const id = String(formData.get("id") || "");
   const intent = String(formData.get("intent") || "");
 
+  if (intent === "bulk_approve_manual_review") {
+    const candidates = await db.invoiceRequest.findMany({
+      where: {
+        orderId: { not: null },
+        status: { in: ["registered", "pending_review"] },
+      },
+      select: {
+        id: true,
+        status: true,
+        invoiceType: true,
+        companyName: true,
+        vatNumber: true,
+        billingCountry: true,
+        fiscalCode: true,
+        pec: true,
+        codiceDestinatario: true,
+        viesValid: true,
+      },
+    });
+
+    const ids = candidates
+      .filter((item: any) => getInvoiceUiStatus(item) === "manual_review")
+      .map((item: any) => item.id);
+
+    if (ids.length) {
+      await db.invoiceRequest.updateMany({
+        where: { id: { in: ids } },
+        data: { status: "completed" },
+      });
+    }
+
+    return null;
+  }
+
+  if (intent === "bulk_approve_rejected") {
+    await db.invoiceRequest.updateMany({
+      where: {
+        orderId: { not: null },
+        status: "rejected",
+      },
+      data: { status: "completed" },
+    });
+
+    return null;
+  }
+
   if (!id) {
     throw new Response("ID richiesta mancante", { status: 400 });
   }
@@ -324,6 +370,43 @@ export default function InvoiceRequestsPage() {
         <Stat label="Reverse charge" value={stats.reverseCharge} tone="info" />
       </section>
 
+      <section className="zi-bulk-actions">
+        <div>
+          <strong>Comandi rapidi</strong>
+          <span>
+            Le approvazioni massive agiscono solo sulle richieste lavorabili: le incomplete restano escluse.
+          </span>
+        </div>
+
+        <Form method="post" className="zi-bulk-buttons">
+          <button
+            name="intent"
+            value="bulk_approve_manual_review"
+            className="zi-button zi-button-green"
+            onClick={(event) => {
+              if (!confirm("Approvare tutte le richieste in verifica manuale lavorabili? Le incomplete saranno escluse.")) {
+                event.preventDefault();
+              }
+            }}
+          >
+            Approva tutte le verifiche manuali
+          </button>
+
+          <button
+            name="intent"
+            value="bulk_approve_rejected"
+            className="zi-button zi-button-yellow"
+            onClick={(event) => {
+              if (!confirm("Riapprovare tutte le richieste rifiutate?")) {
+                event.preventDefault();
+              }
+            }}
+          >
+            Approva tutte le rifiutate
+          </button>
+        </Form>
+      </section>
+
       <section className="zi-toolbar">
         <input
           value={query}
@@ -534,7 +617,7 @@ export default function InvoiceRequestsPage() {
                         </button>
 
                         <button name="intent" value="completed" className="zi-button zi-button-green">
-                          Segna completata
+                          Approva manualmente
                         </button>
 
                         <button name="intent" value="rejected" className="zi-button zi-button-red">
@@ -695,6 +778,40 @@ function Style() {
       .zi-stat-warning strong { color: #b87916; }
       .zi-stat-danger strong { color: #a13a24; }
       .zi-stat-info strong { color: #2f6fed; }
+
+
+      .zi-bulk-actions {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 16px;
+        margin: 18px 0;
+        padding: 16px;
+        border: 1px solid #e4e7ec;
+        border-radius: 18px;
+        background: #ffffff;
+        box-shadow: 0 10px 30px rgba(15, 23, 42, 0.06);
+      }
+
+      .zi-bulk-actions strong {
+        display: block;
+        font-size: 14px;
+        color: #101828;
+        margin-bottom: 4px;
+      }
+
+      .zi-bulk-actions span {
+        display: block;
+        font-size: 13px;
+        color: #667085;
+      }
+
+      .zi-bulk-buttons {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+        gap: 10px;
+      }
 
       .zi-toolbar {
         display: grid;
@@ -956,6 +1073,19 @@ function Style() {
 
         .zi-toolbar {
           grid-template-columns: 1fr;
+        }
+
+        .zi-bulk-actions {
+          align-items: stretch;
+          flex-direction: column;
+        }
+
+        .zi-bulk-buttons {
+          justify-content: stretch;
+        }
+
+        .zi-bulk-buttons .zi-button {
+          width: 100%;
         }
 
         .zi-toolbar input,
