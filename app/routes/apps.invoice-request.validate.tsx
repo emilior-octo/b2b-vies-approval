@@ -12,6 +12,96 @@ const DEFAULT_SHOP = "zig-italia-frutta-secca-e-semi.myshopify.com";
 const SHOP_COUNTRY = "IT";
 const VIES_NAME_UNAVAILABLE_COUNTRIES = ["DE"];
 
+function stripVatCountryPrefix(vatNumber: string, countryCode: string) {
+  let raw = normalizeVat(vatNumber || "");
+  const country = normalizeCountry(countryCode || "");
+
+  if (country && raw.startsWith(country)) {
+    raw = raw.slice(country.length);
+  }
+
+  return raw;
+}
+
+function normalizeVatForCountry(vatNumber: string, countryCode: string) {
+  const country = normalizeCountry(countryCode || "");
+  let raw = normalizeVat(vatNumber || "");
+
+  if (!raw) return raw;
+
+  if (country && raw.startsWith(country)) {
+    raw = raw.slice(country.length);
+  }
+
+  if (country === "AT") {
+    raw = raw.replace(/^U?/, "U");
+  }
+
+  return country ? `${country}${raw}` : raw;
+}
+
+function normalizeVatForVies(vatNumber: string, countryCode: string) {
+  let raw = stripVatCountryPrefix(vatNumber, countryCode);
+
+  if (
+    normalizeCountry(countryCode || "") === "AT" &&
+    raw &&
+    !raw.startsWith("U")
+  ) {
+    raw = `U${raw}`;
+  }
+
+  return raw;
+}
+
+function safeDisplayCompanyName(...values: Array<string | null | undefined>) {
+  for (const value of values) {
+    const cleaned = cleanViesText(value);
+    if (cleaned) return cleaned;
+  }
+
+  return "";
+}
+
+function isPlaceholderCustomerName(
+  firstName?: string | null,
+  lastName?: string | null,
+) {
+  const first = String(firstName || "")
+    .trim()
+    .toLowerCase();
+  const last = String(lastName || "")
+    .trim()
+    .toLowerCase();
+
+  if (!first && !last) return true;
+  if (first === "invoice" && last === "customer") return true;
+  if (first === "b2b" && last === "customer") return true;
+  if (first === "fatturazione") return true;
+
+  return false;
+}
+
+function buildCustomerIdentity({
+  email,
+  companyName,
+  viesCompanyName,
+}: {
+  email: string;
+  companyName?: string;
+  viesCompanyName?: string;
+}) {
+  const effectiveCompanyName =
+    safeDisplayCompanyName(companyName, viesCompanyName) ||
+    String(email || "").split("@")[0] ||
+    "Cliente";
+
+  return {
+    firstName: "Fatturazione",
+    lastName: effectiveCompanyName.slice(0, 255),
+  };
+}
+
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
@@ -44,7 +134,14 @@ async function findCustomerByEmail(admin: any, email: string) {
           nodes {
             id
             email
+            firstName
+            lastName
             taxExempt
+            companyContactProfiles(first: 5) {
+              nodes {
+                company { id name }
+              }
+            }
           }
         }
       }
@@ -69,7 +166,10 @@ async function setOwnerMetafields(
         ownerId,
         namespace,
         key,
-        type: key === "vies_address" ? "multi_line_text_field" : "single_line_text_field",
+        type:
+          key === "vies_address"
+            ? "multi_line_text_field"
+            : "single_line_text_field",
         value: String(value ?? "").trim(),
       };
     });
@@ -90,23 +190,33 @@ async function setOwnerMetafields(
   );
 
   const errors = data?.data?.metafieldsSet?.userErrors || [];
-  if (errors.length) throw new Error(errors.map((e: any) => e.message).join(" | "));
+  if (errors.length)
+    throw new Error(errors.map((e: any) => e.message).join(" | "));
 
   return data?.data?.metafieldsSet?.metafields || [];
 }
 
-async function createOrPrepareTaxExemptCustomer({
+async function createOrPrepareInvoiceCustomer({
   shop,
   email,
   companyName,
+  viesCompanyName,
+  taxExempt,
 }: {
   shop: string;
   email: string;
   companyName?: string;
+  viesCompanyName?: string;
+  taxExempt: boolean;
 }) {
   if (!email) return null;
 
   const { admin } = await unauthenticated.admin(shop);
+  const identity = buildCustomerIdentity({
+    email,
+    companyName,
+    viesCompanyName,
+  });
 
   let customer = await findCustomerByEmail(admin, email);
 
@@ -116,7 +226,16 @@ async function createOrPrepareTaxExemptCustomer({
       `#graphql
         mutation CustomerCreate($input: CustomerInput!) {
           customerCreate(input: $input) {
-            customer { id email taxExempt }
+            customer {
+              id
+              email
+              firstName
+              lastName
+              taxExempt
+              companyContactProfiles(first: 5) {
+                nodes { company { id name } }
+              }
+            }
             userErrors { field message }
           }
         }
@@ -124,120 +243,83 @@ async function createOrPrepareTaxExemptCustomer({
       {
         input: {
           email,
-          firstName: "Invoice",
-          lastName: "Customer",
-          note: `Invoice request reverse charge - ${companyName || ""}`,
-          tags: ["invoice_request", "reverse_charge_customer"],
+          firstName: identity.firstName,
+          lastName: identity.lastName,
+          note: `Invoice request company invoice - ${safeDisplayCompanyName(companyName, viesCompanyName) || email}`,
+          tags: taxExempt
+            ? ["invoice_request", "reverse_charge_customer"]
+            : ["invoice_request", "company_invoice_customer"],
         },
       },
     );
 
     const errors = createData?.data?.customerCreate?.userErrors || [];
-    if (errors.length) throw new Error(errors.map((e: any) => e.message).join(" | "));
+    if (errors.length)
+      throw new Error(errors.map((e: any) => e.message).join(" | "));
 
     customer = createData?.data?.customerCreate?.customer;
   }
 
   if (!customer?.id) return null;
 
+  const shouldUpdateIdentity = isPlaceholderCustomerName(
+    customer.firstName,
+    customer.lastName,
+  );
+  const input: any = {
+    id: customer.id,
+    taxExempt,
+    tags: taxExempt
+      ? ["invoice_request", "reverse_charge_customer"]
+      : ["invoice_request", "company_invoice_customer"],
+  };
+
+  if (shouldUpdateIdentity) {
+    input.firstName = identity.firstName;
+    input.lastName = identity.lastName;
+  }
+
   const updateData = await graphQL(
     admin,
     `#graphql
       mutation CustomerUpdate($input: CustomerInput!) {
         customerUpdate(input: $input) {
-          customer { id email taxExempt }
+          customer {
+            id
+            email
+            firstName
+            lastName
+            taxExempt
+            companyContactProfiles(first: 5) {
+              nodes { company { id name } }
+            }
+          }
           userErrors { field message }
         }
       }
     `,
-    {
-      input: {
-        id: customer.id,
-        taxExempt: true,
-        tags: ["invoice_request", "reverse_charge_customer"],
-      },
-    },
+    { input },
   );
 
   const errors = updateData?.data?.customerUpdate?.userErrors || [];
-  if (errors.length) throw new Error(errors.map((e: any) => e.message).join(" | "));
+  if (errors.length)
+    throw new Error(errors.map((e: any) => e.message).join(" | "));
 
   return updateData?.data?.customerUpdate?.customer || customer;
 }
-
 
 function cleanViesText(value: string | null | undefined) {
   const text = String(value || "").trim();
   if (!text) return "";
 
   const normalized = text.replace(/[-–—_\s]+/g, "").toLowerCase();
-  if (["na", "n/a", "null", "none", "unknown", "unavailable"].includes(normalized)) {
+  if (
+    ["na", "n/a", "null", "none", "unknown", "unavailable"].includes(normalized)
+  ) {
     return "";
   }
 
   return text;
-}
-
-function missingCompanyInvoiceFields({
-  invoiceType,
-  countryCode,
-  vatNumber,
-  companyName,
-  customerEmail,
-  pec,
-  sdi,
-}: {
-  invoiceType: string;
-  countryCode: string;
-  vatNumber: string;
-  companyName: string;
-  customerEmail: string;
-  pec: string;
-  sdi: string;
-}) {
-  const missing: string[] = [];
-  const isItaly = countryCode === "IT";
-
-  if (invoiceType !== "company") return missing;
-  if (!String(companyName || "").trim()) missing.push("company_name");
-  if (!String(vatNumber || "").trim()) missing.push("vat_number");
-  if (!String(countryCode || "").trim()) missing.push("country_code");
-
-  if (isItaly) {
-    if (!String(pec || "").trim() && !String(sdi || "").trim()) {
-      missing.push("pec_or_sdi");
-    }
-  } else if (!String(customerEmail || "").trim()) {
-    missing.push("customer_email");
-  }
-
-  return missing;
-}
-
-function incompleteInvoiceMessage(locale: string, missingFields: string[]) {
-  if (locale === "it") {
-    const labelMap: Record<string, string> = {
-      company_name: "ragione sociale",
-      vat_number: "Partita IVA",
-      country_code: "Paese",
-      pec_or_sdi: "PEC o Codice SDI",
-      customer_email: "email da usare al checkout",
-    };
-
-    const readable = missingFields.map((field) => labelMap[field] || field).join(", ");
-    return `Richiesta fattura incompleta. Controlla i dati mancanti: ${readable}.`;
-  }
-
-  const labelMap: Record<string, string> = {
-    company_name: "company name",
-    vat_number: "VAT number",
-    country_code: "country",
-    pec_or_sdi: "PEC or SDI code",
-    customer_email: "checkout email",
-  };
-
-  const readable = missingFields.map((field) => labelMap[field] || field).join(", ");
-  return `Incomplete invoice request. Please check the missing details: ${readable}.`;
 }
 
 async function createCompanyForInvoiceRequest({
@@ -259,8 +341,29 @@ async function createCompanyForInvoiceRequest({
   viesAddress?: string;
   fiscalMetafields: Record<string, string>;
 }) {
-  const effectiveCompanyName = cleanViesText(viesCompanyName) || String(companyName || "").trim();
-  if (!effectiveCompanyName || !customer?.id) return null;
+  const effectiveCompanyName =
+    safeDisplayCompanyName(companyName, viesCompanyName) ||
+    String(customer?.email || "").trim() ||
+    "Azienda B2B";
+
+  if (!customer?.id) return null;
+
+  const existingCompany =
+    customer?.companyContactProfiles?.nodes?.[0]?.company || null;
+  if (existingCompany?.id) {
+    await setOwnerMetafields(admin, existingCompany.id, fiscalMetafields);
+    await setOwnerMetafields(admin, customer.id, {
+      ...fiscalMetafields,
+      "b2b.company_id": existingCompany.id,
+    });
+
+    return {
+      companyId: existingCompany.id,
+      companyLocationId: null,
+      companyName: existingCompany.name || effectiveCompanyName,
+      alreadyAssigned: true,
+    };
+  }
 
   const companyCreateData = await graphQL(
     admin,
@@ -282,11 +385,13 @@ async function createCompanyForInvoiceRequest({
         company: { name: effectiveCompanyName },
         companyLocation: {
           name: effectiveCompanyName,
-          taxRegistrationId: vatNumber,
-          taxExempt: false,
+          taxRegistrationId: normalizeVatForCountry(vatNumber, countryCode),
+          taxExempt: countryCode !== "IT",
           billingAddress: {
             recipient: effectiveCompanyName,
-            address1: cleanViesText(viesAddress).split("\n")[0]?.trim() || "Address unavailable from VIES",
+            address1:
+              cleanViesText(viesAddress).split("\n")[0]?.trim() ||
+              effectiveCompanyName,
             city: "N/A",
             countryCode: countryCode || "IT",
           },
@@ -295,8 +400,10 @@ async function createCompanyForInvoiceRequest({
     },
   );
 
-  const companyErrors = companyCreateData?.data?.companyCreate?.userErrors || [];
-  if (companyErrors.length) throw new Error(companyErrors.map((e: any) => e.message).join(" | "));
+  const companyErrors =
+    companyCreateData?.data?.companyCreate?.userErrors || [];
+  if (companyErrors.length)
+    throw new Error(companyErrors.map((e: any) => e.message).join(" | "));
 
   const company = companyCreateData?.data?.companyCreate?.company;
   const location = company?.locations?.nodes?.[0];
@@ -322,10 +429,13 @@ async function createCompanyForInvoiceRequest({
     { companyId: company.id, customerId: customer.id },
   );
 
-  const assignErrors = assignData?.data?.companyAssignCustomerAsContact?.userErrors || [];
-  if (assignErrors.length) throw new Error(assignErrors.map((e: any) => e.message).join(" | "));
+  const assignErrors =
+    assignData?.data?.companyAssignCustomerAsContact?.userErrors || [];
+  if (assignErrors.length)
+    throw new Error(assignErrors.map((e: any) => e.message).join(" | "));
 
-  const contact = assignData?.data?.companyAssignCustomerAsContact?.companyContact;
+  const contact =
+    assignData?.data?.companyAssignCustomerAsContact?.companyContact;
 
   if (contact?.id) {
     const roleData = await graphQL(
@@ -346,8 +456,10 @@ async function createCompanyForInvoiceRequest({
       },
     );
 
-    const roleErrors = roleData?.data?.companyContactAssignRole?.userErrors || [];
-    if (roleErrors.length) throw new Error(roleErrors.map((e: any) => e.message).join(" | "));
+    const roleErrors =
+      roleData?.data?.companyContactAssignRole?.userErrors || [];
+    if (roleErrors.length)
+      throw new Error(roleErrors.map((e: any) => e.message).join(" | "));
   }
 
   await setOwnerMetafields(admin, company.id, {
@@ -394,9 +506,16 @@ export async function action({ request }: ActionFunctionArgs) {
     const invoiceType = String(payload.invoiceType || "private");
     const cartToken = String(payload.cartToken || "");
     const countryCode = normalizeCountry(payload.countryCode || "IT");
-    let vatNumber = normalizeVat(payload.vatNumber || "");
-    const companyName = String(payload.companyName || "").trim();
-    const customerEmail = String(payload.customerEmail || payload.email || "").trim().toLowerCase();
+    const submittedVatNumber = normalizeVat(payload.vatNumber || "");
+    let vatNumber = normalizeVatForCountry(submittedVatNumber, countryCode);
+    const vatNumberForVies = normalizeVatForVies(
+      submittedVatNumber,
+      countryCode,
+    );
+    const companyName = cleanViesText(payload.companyName || "");
+    const customerEmail = String(payload.customerEmail || payload.email || "")
+      .trim()
+      .toLowerCase();
     const pec = String(payload.pec || "").trim();
     const sdi = String(payload.sdi || "").trim();
 
@@ -423,58 +542,25 @@ export async function action({ request }: ActionFunctionArgs) {
     }
 
     if (invoiceType !== "company") {
-      return json({ ok: false, error: "Invalid invoice type." }, { status: 400 });
+      return json(
+        { ok: false, error: "Invalid invoice type." },
+        { status: 400 },
+      );
     }
 
     const isItaly = countryCode === "IT";
-    const missingFields = missingCompanyInvoiceFields({
-      invoiceType,
-      countryCode,
-      vatNumber,
-      companyName,
-      customerEmail,
-      pec,
-      sdi,
-    });
 
-    if (missingFields.length) {
-      const invoiceRequest = await db.invoiceRequest.create({
-        data: {
-          shop,
-          cartToken: cartToken || null,
-          invoiceType: "company",
-          email: customerEmail || null,
-          companyName: companyName || null,
-          vatNumber: vatNumber || "",
-          billingCountry: countryCode,
-          pec: isItaly ? pec || null : null,
-          codiceDestinatario: isItaly ? sdi || null : null,
-          viesChecked: false,
-          viesValid: null,
-          reverseCharge: false,
-          taxExemptApplied: false,
-          status: "registered",
+    if (!customerEmail) {
+      return json(
+        {
+          ok: false,
+          error:
+            locale === "it"
+              ? "Inserisci l’email che userai al checkout. Serve per associare il cliente all’azienda prima dell’ordine."
+              : "Enter the email you will use at checkout. It is required to link the customer to the company before the order.",
         },
-      });
-
-      return json({
-        ok: true,
-        invoiceRequestId: invoiceRequest.id,
-        invoiceType: "company",
-        customerEmail,
-        vatNumber,
-        countryCode,
-        viesChecked: false,
-        viesValid: null,
-        reverseCharge: false,
-        taxExemptApplied: false,
-        taxExemptCustomerPrepared: false,
-        mustUseSameEmailAtCheckout: false,
-        incompleteRequest: true,
-        missingFields,
-        validationMessage: "INCOMPLETE_INVOICE_DATA",
-        message: incompleteInvoiceMessage(locale, missingFields),
-      });
+        { status: 400 },
+      );
     }
 
     let viesChecked = false;
@@ -486,11 +572,10 @@ export async function action({ request }: ActionFunctionArgs) {
     let preparedCustomer: any = null;
     let status = "registered";
     let pendingManualReview = false;
-    let validationMessage: "VAT_NOT_VERIFIED" | null = null;
 
     try {
       const verification = await verifyCompanyVat({
-        vatNumber,
+        vatNumber: vatNumberForVies,
         companyName,
         countryCode,
       });
@@ -499,11 +584,15 @@ export async function action({ request }: ActionFunctionArgs) {
       viesValid = verification.vies.valid;
       viesCompanyName = verification.vies.companyName || "";
       viesAddress = verification.vies.address || "";
-      vatNumber = verification.vies.vatNumber || vatNumber;
+      vatNumber = normalizeVatForCountry(
+        verification.vies.vatNumber || vatNumberForVies || vatNumber,
+        verification.vies.countryCode || countryCode,
+      );
 
       const acceptsMissingViesName =
-        VIES_NAME_UNAVAILABLE_COUNTRIES.includes(verification.vies.countryCode) &&
-        !String(viesCompanyName || "").trim();
+        VIES_NAME_UNAVAILABLE_COUNTRIES.includes(
+          verification.vies.countryCode,
+        ) && !String(viesCompanyName || "").trim();
 
       reverseCharge = shouldApplyReverseCharge({
         shopCountry: SHOP_COUNTRY,
@@ -511,20 +600,23 @@ export async function action({ request }: ActionFunctionArgs) {
         viesValid,
       });
 
-      if (reverseCharge && customerEmail) {
-        preparedCustomer = await createOrPrepareTaxExemptCustomer({
+      if (viesValid && customerEmail) {
+        preparedCustomer = await createOrPrepareInvoiceCustomer({
           shop,
           email: customerEmail,
-          companyName: viesCompanyName || companyName,
+          companyName,
+          viesCompanyName,
+          taxExempt: Boolean(reverseCharge),
         });
 
-        taxExemptCustomerPrepared = Boolean(preparedCustomer?.taxExempt);
+        taxExemptCustomerPrepared = Boolean(
+          reverseCharge && preparedCustomer?.taxExempt,
+        );
       }
 
       if (!viesValid) {
         status = "pending_review";
         pendingManualReview = true;
-        validationMessage = "VAT_NOT_VERIFIED";
       }
     } catch (error) {
       console.error("Invoice VIES check failed:", error);
@@ -535,7 +627,6 @@ export async function action({ request }: ActionFunctionArgs) {
       viesValid = null;
       reverseCharge = false;
       taxExemptCustomerPrepared = false;
-      validationMessage = "VAT_NOT_VERIFIED";
     }
 
     const invoiceRequest = await db.invoiceRequest.create({
@@ -562,10 +653,12 @@ export async function action({ request }: ActionFunctionArgs) {
 
     let invoiceCompany: any = null;
 
-    if (invoiceType === "company" && preparedCustomer?.id && (reverseCharge || countryCode === "IT" || viesValid)) {
+    if (invoiceType === "company" && preparedCustomer?.id && viesValid) {
       const { admin } = await unauthenticated.admin(shop);
       const viesStatus =
-        viesValid && !String(viesCompanyName || "").trim() && VIES_NAME_UNAVAILABLE_COUNTRIES.includes(countryCode)
+        viesValid &&
+        !String(viesCompanyName || "").trim() &&
+        VIES_NAME_UNAVAILABLE_COUNTRIES.includes(countryCode)
           ? "valid_name_unavailable"
           : viesValid
             ? "valid"
@@ -595,15 +688,9 @@ export async function action({ request }: ActionFunctionArgs) {
         fiscalMetafields,
       });
 
-      if (invoiceCompany?.companyId || invoiceCompany?.companyLocationId) {
-        await db.invoiceRequest.update({
-          where: { id: invoiceRequest.id },
-          data: {
-            shopifyCompanyId: invoiceCompany.companyId || null,
-            shopifyCompanyLocationId: invoiceCompany.companyLocationId || null,
-          },
-        });
-      }
+      // Company IDs are stored on Shopify customer/company metafields.
+      // The current InvoiceRequest Prisma model does not contain company ID columns,
+      // so do not write unknown fields here.
     }
 
     return json({
@@ -621,11 +708,13 @@ export async function action({ request }: ActionFunctionArgs) {
       taxExemptApplied: taxExemptCustomerPrepared,
       taxExemptCustomerPrepared,
       mustUseSameEmailAtCheckout: Boolean(reverseCharge && customerEmail),
-      pendingReview: pendingManualReview,
       pendingManualReview,
-      validationMessage,
       company: invoiceCompany,
-      message: undefined,
+      message: pendingManualReview
+        ? locale === "it"
+          ? "Richiesta salvata per verifica manuale. Controlleremo il VAT prima della fatturazione."
+          : "Invoice request saved for manual review. We will check the VAT before invoicing."
+        : undefined,
     });
   } catch (error: any) {
     console.error("Invoice request validate error:", error);

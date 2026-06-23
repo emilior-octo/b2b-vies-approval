@@ -81,7 +81,9 @@ function normalize(value: any) {
 }
 
 function normalizeKey(value: any) {
-  return normalize(value).toLowerCase().replace(/[^a-z0-9]/g, "");
+  return normalize(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "");
 }
 
 function yes(value: any) {
@@ -114,7 +116,9 @@ function readPairKey(item: any) {
 }
 
 function readPairValue(item: any) {
-  return normalize(item?.value ?? item?.val ?? item?.text ?? item?.content ?? "");
+  return normalize(
+    item?.value ?? item?.val ?? item?.text ?? item?.content ?? "",
+  );
 }
 
 function getWebhookAttributes(order: any) {
@@ -221,6 +225,11 @@ async function getOrderApiData(admin: any, orderGid: string) {
             viesChecked: metafield(namespace: "custom", key: "vies_checked") { value }
             viesValid: metafield(namespace: "custom", key: "vies_valid") { value }
             reverseCharge: metafield(namespace: "custom", key: "reverse_charge") { value }
+            companyContactProfiles(first: 5) {
+              nodes {
+                company { id name }
+              }
+            }
             b2bMetafields: metafields(first: 40, namespace: "b2b") {
               nodes { key value }
             }
@@ -249,7 +258,8 @@ async function updateOrderNote(admin: any, orderGid: string, note: string) {
   );
 
   const errors = data?.data?.orderUpdate?.userErrors || [];
-  if (errors.length) throw new Error(errors.map((e: any) => e.message).join(" | "));
+  if (errors.length)
+    throw new Error(errors.map((e: any) => e.message).join(" | "));
 }
 
 async function addOrderTags(admin: any, orderGid: string, tags: string[]) {
@@ -269,7 +279,8 @@ async function addOrderTags(admin: any, orderGid: string, tags: string[]) {
   );
 
   const errors = data?.data?.tagsAdd?.userErrors || [];
-  if (errors.length) throw new Error(errors.map((e: any) => e.message).join(" | "));
+  if (errors.length)
+    throw new Error(errors.map((e: any) => e.message).join(" | "));
 }
 
 async function setMetafields(
@@ -312,16 +323,136 @@ async function setMetafields(
   );
 
   const errors = data?.data?.metafieldsSet?.userErrors || [];
-  if (errors.length) throw new Error(errors.map((e: any) => e.message).join(" | "));
+  if (errors.length)
+    throw new Error(errors.map((e: any) => e.message).join(" | "));
 
   return data?.data?.metafieldsSet?.metafields || [];
+}
+
+function isPlaceholderCustomerName(
+  firstName?: string | null,
+  lastName?: string | null,
+) {
+  const first = normalize(firstName).toLowerCase();
+  const last = normalize(lastName).toLowerCase();
+
+  if (!first && !last) return true;
+  if (first === "invoice" && last === "customer") return true;
+  if (first === "b2b" && last === "customer") return true;
+  if (first === "fatturazione") return true;
+
+  return false;
+}
+
+function isPlaceholderCompanyName(name?: string | null) {
+  const cleaned = normalize(name)
+    .replace(/[-–—_\s]+/g, "")
+    .toLowerCase();
+  return (
+    !cleaned ||
+    ["na", "null", "none", "unknown", "unavailable", "aziendab2b"].includes(
+      cleaned,
+    )
+  );
+}
+
+async function updateCustomerIdentityFromCheckout(
+  admin: any,
+  customerGid: string,
+  orderApi: any,
+  invoiceData: any,
+) {
+  if (!customerGid) return;
+
+  const firstName = normalize(invoiceData.firstName);
+  const lastName = normalize(invoiceData.lastName);
+
+  if (!firstName && !lastName) return;
+  if (
+    !isPlaceholderCustomerName(
+      orderApi?.customer?.firstName,
+      orderApi?.customer?.lastName,
+    )
+  )
+    return;
+
+  const input: any = { id: customerGid };
+  if (firstName) input.firstName = firstName;
+  if (lastName) input.lastName = lastName;
+
+  const data = await graphQL(
+    admin,
+    `#graphql
+      mutation CustomerUpdateCheckoutIdentity($input: CustomerInput!) {
+        customerUpdate(input: $input) {
+          customer { id firstName lastName }
+          userErrors { field message }
+        }
+      }
+    `,
+    { input },
+  );
+
+  const errors = data?.data?.customerUpdate?.userErrors || [];
+  if (errors.length)
+    throw new Error(errors.map((e: any) => e.message).join(" | "));
+}
+
+function getCustomerCompanyFromOrder(
+  orderApi: any,
+  b2bMeta: Record<string, string>,
+) {
+  const profileCompany =
+    orderApi?.customer?.companyContactProfiles?.nodes?.[0]?.company || null;
+
+  return {
+    id: profileCompany?.id || b2bMeta.company_id || "",
+    name: profileCompany?.name || "",
+  };
+}
+
+async function updateCompanyNameFromCheckout(
+  admin: any,
+  companyId: string,
+  currentName: string,
+  invoiceData: any,
+) {
+  const companyName = normalize(invoiceData.companyName);
+  if (!companyId || !companyName) return;
+
+  const shouldUpdate =
+    isPlaceholderCompanyName(currentName) || currentName !== companyName;
+  if (!shouldUpdate) return;
+
+  try {
+    const data = await graphQL(
+      admin,
+      `#graphql
+        mutation CompanyUpdateCheckoutName($companyId: ID!, $input: CompanyInput!) {
+          companyUpdate(companyId: $companyId, input: $input) {
+            company { id name }
+            userErrors { field message }
+          }
+        }
+      `,
+      { companyId, input: { name: companyName } },
+    );
+
+    const errors = data?.data?.companyUpdate?.userErrors || [];
+    if (errors.length)
+      throw new Error(errors.map((e: any) => e.message).join(" | "));
+  } catch (error) {
+    console.error("Company name update from checkout failed:", error);
+  }
 }
 
 async function getInvoiceRequestFromDb(invoiceRequestId: string) {
   if (!invoiceRequestId) return null;
 
   try {
-    return await db.invoiceRequest.findUnique({ where: { id: invoiceRequestId } });
+    return await db.invoiceRequest.findUnique({
+      where: { id: invoiceRequestId },
+    });
   } catch (error) {
     console.error("InvoiceRequest DB read failed:", error);
     return null;
@@ -344,7 +475,12 @@ function withoutBlock(note: string, startMarker: string, endMarker: string) {
   return current.replace(pattern, "\n").trim();
 }
 
-function replaceBlock(note: string, block: string, startMarker: string, endMarker: string) {
+function replaceBlock(
+  note: string,
+  block: string,
+  startMarker: string,
+  endMarker: string,
+) {
   const clean = withoutBlock(note, startMarker, endMarker);
   return [clean, block].filter(Boolean).join("\n\n");
 }
@@ -353,7 +489,11 @@ function buildInvoiceNote(data: any) {
   const invoiceType = normalize(data.invoiceType || "private");
   const isCompany = invoiceType === "company";
 
-  const lines = [INVOICE_START, "", `Type: ${isCompany ? "Company" : "Private invoice"}`];
+  const lines = [
+    INVOICE_START,
+    "",
+    `Type: ${isCompany ? "Company" : "Private invoice"}`,
+  ];
 
   if (isCompany) {
     lines.push(
@@ -418,22 +558,27 @@ function getB2BMeta(orderApi: any) {
 function hasB2BMeta(meta: Record<string, string>) {
   return Boolean(
     meta.vat_number ||
-      meta.company_name_submitted ||
-      meta.vies_company_name ||
-      meta.pec ||
-      meta.codice_destinatario,
+    meta.company_name_submitted ||
+    meta.vies_company_name ||
+    meta.pec ||
+    meta.codice_destinatario,
   );
 }
 
 function getOrderGid(orderPayload: any) {
-  return orderPayload.admin_graphql_api_id || `gid://shopify/Order/${orderPayload.id}`;
+  return (
+    orderPayload.admin_graphql_api_id ||
+    `gid://shopify/Order/${orderPayload.id}`
+  );
 }
 
 function getCustomerGid(orderPayload: any, orderApi: any) {
   return (
     orderApi?.customer?.id ||
     orderPayload.customer?.admin_graphql_api_id ||
-    (orderPayload.customer?.id ? `gid://shopify/Customer/${orderPayload.customer.id}` : "")
+    (orderPayload.customer?.id
+      ? `gid://shopify/Customer/${orderPayload.customer.id}`
+      : "")
   );
 }
 
@@ -450,7 +595,8 @@ function buildInvoiceData({ orderPayload, orderApi, invoiceRequest }: any) {
     "private";
 
   const invoiceRequestId =
-    getAttrFromPairs(allPairs, INVOICE_REQUEST_ID_KEYS) || normalize(invoiceRequest?.id);
+    getAttrFromPairs(allPairs, INVOICE_REQUEST_ID_KEYS) ||
+    normalize(invoiceRequest?.id);
 
   const firstName =
     normalize(customer?.firstName) ||
@@ -566,8 +712,13 @@ export const action = async ({ request }: any) => {
     const apiPairs = orderApi?.customAttributes || [];
     const allPairs = [...webhookPairs, ...apiPairs];
 
-    const invoiceRequested = yes(getAttrFromPairs(allPairs, INVOICE_REQUEST_KEYS));
-    const invoiceRequestId = getAttrFromPairs(allPairs, INVOICE_REQUEST_ID_KEYS);
+    const invoiceRequested = yes(
+      getAttrFromPairs(allPairs, INVOICE_REQUEST_KEYS),
+    );
+    const invoiceRequestId = getAttrFromPairs(
+      allPairs,
+      INVOICE_REQUEST_ID_KEYS,
+    );
     const invoiceRequest = await getInvoiceRequestFromDb(invoiceRequestId);
     const customerGid = getCustomerGid(orderPayload, orderApi);
 
@@ -575,7 +726,11 @@ export const action = async ({ request }: any) => {
     const tags: string[] = [];
 
     if (invoiceRequested) {
-      const invoiceData = buildInvoiceData({ orderPayload, orderApi, invoiceRequest });
+      const invoiceData = buildInvoiceData({
+        orderPayload,
+        orderApi,
+        invoiceRequest,
+      });
       const fiscalNote = buildInvoiceNote(invoiceData);
 
       nextNote = replaceBlock(nextNote, fiscalNote, INVOICE_START, INVOICE_END);
@@ -629,7 +784,26 @@ export const action = async ({ request }: any) => {
           "custom.vies_valid": invoiceData.viesValid,
           "custom.reverse_charge": invoiceData.reverseCharge,
         });
+
+        await updateCustomerIdentityFromCheckout(
+          admin,
+          customerGid,
+          orderApi,
+          invoiceData,
+        );
       }
+
+      const b2bMetaForCompany = getB2BMeta(orderApi);
+      const customerCompany = getCustomerCompanyFromOrder(
+        orderApi,
+        b2bMetaForCompany,
+      );
+      await updateCompanyNameFromCheckout(
+        admin,
+        customerCompany.id,
+        customerCompany.name,
+        invoiceData,
+      );
 
       tags.push("invoice_request");
       if (yes(invoiceData.reverseCharge)) tags.push("reverse_charge");
@@ -657,7 +831,10 @@ export const action = async ({ request }: any) => {
       }
     }
 
-    if (nextNote && nextNote !== normalize(orderApi?.note || orderPayload?.note || "")) {
+    if (
+      nextNote &&
+      nextNote !== normalize(orderApi?.note || orderPayload?.note || "")
+    ) {
       await updateOrderNote(admin, orderGid, nextNote);
     }
 
