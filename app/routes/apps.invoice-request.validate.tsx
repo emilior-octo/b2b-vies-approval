@@ -695,12 +695,10 @@ export async function action({ request }: ActionFunctionArgs) {
         });
 
         if (invoiceCompany?.companyId || invoiceCompany?.companyLocationId) {
-          await db.invoiceRequest.update({
-            where: { id: invoiceRequest.id },
-            data: {
-              shopifyCompanyId: invoiceCompany.companyId || null,
-              shopifyCompanyLocationId: invoiceCompany.companyLocationId || null,
-            },
+          console.log("[Invoice Request] Shopify company synced", {
+            invoiceRequestId: invoiceRequest.id,
+            companyId: invoiceCompany.companyId || "",
+            companyLocationId: invoiceCompany.companyLocationId || "",
           });
         }
       } catch (error) {
