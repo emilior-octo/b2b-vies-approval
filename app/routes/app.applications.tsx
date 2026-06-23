@@ -832,6 +832,51 @@ function statusTone(status: string): "success" | "danger" | "warning" {
   return "warning";
 }
 
+function statusLabel(status: string) {
+  return statusText(status);
+}
+
+function statusPill(status: string): CSSProperties {
+  const tone = statusTone(status);
+
+  if (tone === "success") {
+    return {
+      display: "inline-flex",
+      borderRadius: 999,
+      padding: "7px 11px",
+      fontWeight: 900,
+      fontSize: 13,
+      background: "#dff3df",
+      color: "#1f5f2f",
+      whiteSpace: "nowrap",
+    };
+  }
+
+  if (tone === "danger") {
+    return {
+      display: "inline-flex",
+      borderRadius: 999,
+      padding: "7px 11px",
+      fontWeight: 900,
+      fontSize: 13,
+      background: "#ffe1dc",
+      color: "#8a2b1b",
+      whiteSpace: "nowrap",
+    };
+  }
+
+  return {
+    display: "inline-flex",
+    borderRadius: 999,
+    padding: "7px 11px",
+    fontWeight: 900,
+    fontSize: 13,
+    background: "#fff3cd",
+    color: "#7a4b00",
+    whiteSpace: "nowrap",
+  };
+}
+
 function viesText(app: any) {
   if (app.viesValid === true) return "VIES valido";
   if (app.viesValid === false) return "VIES non valido";
@@ -1308,54 +1353,6 @@ function Field({ label, children }: any) {
       {children}
     </label>
   );
-}
-
-function Read({ label, value }: any) {
-  return (
-    <div className="zbe-read">
-      <strong>{label}</strong>
-      <div>{value}</div>
-    </div>
-  );
-}
-
-function Badge({
-  children,
-  tone = "neutral",
-}: {
-  children: React.ReactNode;
-  tone?: "success" | "danger" | "warning" | "info" | "neutral";
-}) {
-  return <span className={`zbe-badge zbe-badge--${tone}`}>{children}</span>;
-}
-
-function Stat({
-  label,
-  value,
-  tone,
-}: {
-  label: string;
-  value: number;
-  tone?: "success" | "warning" | "danger";
-}) {
-  return (
-    <div className="zbe-stat">
-      <div className={`zbe-stat-value ${tone ? `zbe-stat-value--${tone}` : ""}`}>
-        {value}
-      </div>
-      <div className="zbe-stat-label">{label}</div>
-    </div>
-  );
-}
-
-function formatDate(value: string | Date) {
-  return new Date(value).toLocaleString("it-IT", {
-    day: "2-digit",
-    month: "2-digit",
-    year: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
 }
 
 const styles = `
