@@ -1,19 +1,39 @@
-import { Form, useActionData } from "react-router";
+import { useFetcher } from "react-router";
 import { authenticate } from "../shopify.server";
 
+type OwnerType = "CUSTOMER" | "COMPANY" | "ORDER";
+
 type Definition = {
-  ownerType: "CUSTOMER" | "COMPANY" | "ORDER";
+  ownerType: OwnerType;
   namespace: string;
   key: string;
   name: string;
   type: string;
 };
 
+type SyncResult = Definition & {
+  ok: boolean;
+  created: boolean;
+  existing: boolean;
+  error: string | null;
+};
+
+type SyncResponse = {
+  ok: boolean;
+  results: SyncResult[];
+  created: number;
+  existing: number;
+  failed: number;
+  error?: string;
+};
+
 const DEFINITIONS: Definition[] = [
+  // Customer fiscal fields used by invoice requests / checkout fiscal data.
   { ownerType: "CUSTOMER", namespace: "custom", key: "fiscal_code", name: "Fiscal code", type: "single_line_text_field" },
   { ownerType: "CUSTOMER", namespace: "custom", key: "pec", name: "PEC", type: "single_line_text_field" },
   { ownerType: "CUSTOMER", namespace: "custom", key: "sdi", name: "SDI", type: "single_line_text_field" },
 
+  // Customer B2B fields written by the B2B form flow.
   { ownerType: "CUSTOMER", namespace: "b2b", key: "vat_number", name: "B2B VAT number", type: "single_line_text_field" },
   { ownerType: "CUSTOMER", namespace: "b2b", key: "billing_country", name: "B2B billing country", type: "single_line_text_field" },
   { ownerType: "CUSTOMER", namespace: "b2b", key: "company_name_submitted", name: "B2B submitted company", type: "single_line_text_field" },
@@ -26,6 +46,7 @@ const DEFINITIONS: Definition[] = [
   { ownerType: "CUSTOMER", namespace: "b2b", key: "company_id", name: "B2B Company ID", type: "single_line_text_field" },
   { ownerType: "CUSTOMER", namespace: "b2b", key: "company_location_id", name: "B2B Company Location ID", type: "single_line_text_field" },
 
+  // Company B2B fields written by the B2B form flow.
   { ownerType: "COMPANY", namespace: "b2b", key: "vat_number", name: "B2B VAT number", type: "single_line_text_field" },
   { ownerType: "COMPANY", namespace: "b2b", key: "billing_country", name: "B2B billing country", type: "single_line_text_field" },
   { ownerType: "COMPANY", namespace: "b2b", key: "company_name_submitted", name: "B2B submitted company", type: "single_line_text_field" },
@@ -35,8 +56,9 @@ const DEFINITIONS: Definition[] = [
   { ownerType: "COMPANY", namespace: "b2b", key: "pec", name: "B2B PEC", type: "single_line_text_field" },
   { ownerType: "COMPANY", namespace: "b2b", key: "codice_destinatario", name: "B2B codice destinatario", type: "single_line_text_field" },
 
-  { ownerType: "ORDER", namespace: "invoice", key: "request_id", name: "Invoice request ID", type: "single_line_text_field" },
+  // Order invoice fields, used by cart invoice requests and checkout fiscal fields.
   { ownerType: "ORDER", namespace: "invoice", key: "source", name: "Invoice source", type: "single_line_text_field" },
+  { ownerType: "ORDER", namespace: "invoice", key: "request_id", name: "Invoice request ID", type: "single_line_text_field" },
   { ownerType: "ORDER", namespace: "invoice", key: "invoice_type", name: "Invoice type", type: "single_line_text_field" },
   { ownerType: "ORDER", namespace: "invoice", key: "company_name", name: "Invoice company name", type: "single_line_text_field" },
   { ownerType: "ORDER", namespace: "invoice", key: "vat_number", name: "Invoice VAT number", type: "single_line_text_field" },
@@ -53,7 +75,8 @@ const DEFINITIONS: Definition[] = [
   { ownerType: "ORDER", namespace: "invoice", key: "tax_exempt_applied", name: "Invoice tax exempt applied", type: "single_line_text_field" },
   { ownerType: "ORDER", namespace: "invoice", key: "fiscal_note", name: "Invoice fiscal note", type: "multi_line_text_field" },
 
-  { ownerType: "ORDER", namespace: "b2b", key: "is_b2b", name: "B2B order flag", type: "single_line_text_field" },
+  // Order B2B fields, copied from true B2B customer/company data.
+  { ownerType: "ORDER", namespace: "b2b", key: "is_b2b", name: "B2B order", type: "single_line_text_field" },
   { ownerType: "ORDER", namespace: "b2b", key: "source", name: "B2B source", type: "single_line_text_field" },
   { ownerType: "ORDER", namespace: "b2b", key: "company_id", name: "B2B Company ID", type: "single_line_text_field" },
   { ownerType: "ORDER", namespace: "b2b", key: "company_location_id", name: "B2B Company Location ID", type: "single_line_text_field" },
@@ -71,64 +94,142 @@ const DEFINITIONS: Definition[] = [
   { ownerType: "ORDER", namespace: "b2b", key: "fiscal_note", name: "B2B fiscal note", type: "multi_line_text_field" },
 ];
 
-async function graphQL(admin: any, query: string, variables: any = {}) {
-  const response = await admin.graphql(query, { variables });
-  return response.json();
+function json(payload: unknown, status = 200) {
+  return new Response(JSON.stringify(payload), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
 }
 
-async function createDefinition(admin: any, definition: Definition) {
+function errorMessage(error: unknown) {
+  if (error instanceof Error) return error.message;
+  try {
+    return JSON.stringify(error);
+  } catch (_error) {
+    return String(error);
+  }
+}
+
+async function graphQL(admin: any, query: string, variables: any = {}) {
+  const response = await admin.graphql(query, { variables });
+  const data = await response.json();
+
+  if (data?.errors) {
+    throw new Error(JSON.stringify(data.errors));
+  }
+
+  return data;
+}
+
+async function existingDefinitionId(admin: any, definition: Definition) {
   const data = await graphQL(
     admin,
     `#graphql
-      mutation CreateMetafieldDefinition($definition: MetafieldDefinitionInput!) {
-        metafieldDefinitionCreate(definition: $definition) {
-          createdDefinition {
+      query ExistingMetafieldDefinition(
+        $ownerType: MetafieldOwnerType!
+        $namespace: String!
+        $key: String!
+      ) {
+        metafieldDefinitions(
+          first: 1
+          ownerType: $ownerType
+          namespace: $namespace
+          key: $key
+        ) {
+          nodes {
             id
-            namespace
-            key
-            ownerType
-          }
-          userErrors {
-            field
-            message
-            code
           }
         }
       }
     `,
     {
-    
-      definition: {
-        name: definition.name,
-        namespace: definition.namespace,
-        key: definition.key,
-        type: definition.type,
-        ownerType: definition.ownerType,
-      },
+      ownerType: definition.ownerType,
+      namespace: definition.namespace,
+      key: definition.key,
     },
   );
 
-  const errors = data?.data?.metafieldDefinitionCreate?.userErrors || [];
+  return data?.data?.metafieldDefinitions?.nodes?.[0]?.id || "";
+}
 
-  if (errors.length) {
-    const alreadyExists = errors.some((e: any) =>
-      String(e.message || "").toLowerCase().includes("already exists"),
+async function createDefinition(admin: any, definition: Definition): Promise<SyncResult> {
+  try {
+    const existingId = await existingDefinitionId(admin, definition);
+
+    if (existingId) {
+      return {
+        ...definition,
+        ok: true,
+        created: false,
+        existing: true,
+        error: null,
+      };
+    }
+
+    const data = await graphQL(
+      admin,
+      `#graphql
+        mutation CreateMetafieldDefinition($definition: MetafieldDefinitionInput!) {
+          metafieldDefinitionCreate(definition: $definition) {
+            createdDefinition {
+              id
+              namespace
+              key
+              ownerType
+            }
+            userErrors {
+              field
+              message
+              code
+            }
+          }
+        }
+      `,
+      {
+        definition: {
+          name: definition.name,
+          namespace: definition.namespace,
+          key: definition.key,
+          type: definition.type,
+          ownerType: definition.ownerType,
+        },
+      },
     );
+
+    const errors = data?.data?.metafieldDefinitionCreate?.userErrors || [];
+
+    if (errors.length) {
+      const alreadyExists = errors.some((error: any) => {
+        const message = String(error?.message || "").toLowerCase();
+        const code = String(error?.code || "").toLowerCase();
+        return message.includes("already exists") || message.includes("taken") || code.includes("taken");
+      });
+
+      return {
+        ...definition,
+        ok: alreadyExists,
+        created: false,
+        existing: alreadyExists,
+        error: alreadyExists ? null : errors.map((error: any) => error.message).join(" | "),
+      };
+    }
 
     return {
       ...definition,
-      ok: alreadyExists,
-      skipped: alreadyExists,
-      error: alreadyExists ? null : errors.map((e: any) => e.message).join(" | "),
+      ok: true,
+      created: true,
+      existing: false,
+      error: null,
+    };
+  } catch (error) {
+    return {
+      ...definition,
+      ok: false,
+      created: false,
+      existing: false,
+      error: errorMessage(error),
     };
   }
-
-  return {
-    ...definition,
-    ok: true,
-    skipped: false,
-    error: null,
-  };
 }
 
 export async function loader({ request }: any) {
@@ -138,24 +239,34 @@ export async function loader({ request }: any) {
 
 export async function action({ request }: any) {
   const { admin } = await authenticate.admin(request);
+  const formData = await request.formData();
+  const intent = String(formData.get("intent") || "sync_metafields");
 
-  const results = [];
+  if (intent !== "sync_metafields") {
+    return json({ ok: false, error: "Invalid action" }, 400);
+  }
+
+  const results: SyncResult[] = [];
 
   for (const definition of DEFINITIONS) {
     results.push(await createDefinition(admin, definition));
   }
 
-  return {
-    ok: true,
+  const response: SyncResponse = {
+    ok: results.every((result) => result.ok),
     results,
-    created: results.filter((r) => r.ok && !r.skipped).length,
-    skipped: results.filter((r) => r.skipped).length,
-    failed: results.filter((r) => !r.ok).length,
+    created: results.filter((result) => result.created).length,
+    existing: results.filter((result) => result.existing).length,
+    failed: results.filter((result) => !result.ok).length,
   };
+
+  return json(response, response.ok ? 200 : 207);
 }
 
 export default function SettingsPage() {
-  const actionData = useActionData<typeof action>();
+  const fetcher = useFetcher<SyncResponse>();
+  const actionData = fetcher.data;
+  const isSubmitting = fetcher.state !== "idle";
 
   return (
     <div style={page}>
@@ -177,28 +288,29 @@ export default function SettingsPage() {
           invoice requests and order fiscal notes.
         </p>
 
-        <Form method="post">
-          <button style={button} type="submit">
-            Sync metafield definitions
+        <fetcher.Form method="post">
+          <button style={button} type="submit" name="intent" value="sync_metafields" disabled={isSubmitting}>
+            {isSubmitting ? "Syncing..." : "Sync metafield definitions"}
           </button>
-        </Form>
+        </fetcher.Form>
 
         {actionData && (
           <div style={resultBox}>
-            <strong>Sync completed</strong>
+            <strong>{actionData.ok ? "Sync completed" : "Sync completed with errors"}</strong>
             <p>
-              Created: {actionData.created} · Existing: {actionData.skipped} ·
-              Failed: {actionData.failed}
+              Created: {actionData.created} · Existing: {actionData.existing} · Failed: {actionData.failed}
             </p>
 
+            {actionData.error && <p style={error}>{actionData.error}</p>}
+
             <div style={list}>
-              {actionData.results.map((item: any) => (
+              {actionData.results.map((item: SyncResult) => (
                 <div key={`${item.ownerType}-${item.namespace}-${item.key}`} style={row}>
                   <span>
                     {item.ownerType} · {item.namespace}.{item.key}
                   </span>
                   <strong>
-                    {item.ok ? (item.skipped ? "Existing" : "OK") : "Failed"}
+                    {item.ok ? (item.existing ? "Existing" : "Created") : "Failed"}
                   </strong>
                   {item.error && <small style={error}>{item.error}</small>}
                 </div>
