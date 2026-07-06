@@ -160,12 +160,48 @@ function formatDate(value: string | Date) {
   return new Date(value).toLocaleString("it-IT");
 }
 
+
+function isViesTechnicalError(item: any) {
+  const country = String(item?.billingCountry || "").toUpperCase();
+  const note = String(item?.viesAddress || "").toUpperCase();
+
+  return Boolean(
+    item?.invoiceType === "company" &&
+      country &&
+      country !== "IT" &&
+      item?.status === "pending_review" &&
+      item?.viesChecked !== true &&
+      item?.viesValid == null &&
+      note.includes("ERRORE TECNICO VIES")
+  );
+}
+
+function viesOutcomeLabel(item: any) {
+  if (isViesTechnicalError(item)) {
+    return "Sistema VIES occupato / verifica non eseguita";
+  }
+
+  if (item?.viesValid === true) return "Sì, valido";
+  if (item?.viesValid === false) return "Non valido";
+  return "—";
+}
+
+function viesAdminNote(item: any) {
+  if (isViesTechnicalError(item)) {
+    return item?.viesAddress || "Errore tecnico VIES: sistema occupato";
+  }
+
+  return "—";
+}
+
 function getInvoiceUiStatus(item: any): InvoiceUiStatus {
   if (item.status === "completed") return "completed";
   if (item.status === "rejected") return "rejected";
 
   const missing = item.missingFieldsList || missingFields(item);
-  const hasBlockingMissingFields = missing.some((field) => field !== "VIES non valido/da controllare");
+  const hasBlockingMissingFields = missing.some(
+    (field) => field !== "VIES non valido/da controllare" && field !== "VIES occupato/cliente da assistere",
+  );
 
   if (hasBlockingMissingFields) return "incomplete";
   if (item.status === "pending_review") return "manual_review";
@@ -189,6 +225,10 @@ function normalizeStatus(itemOrStatus: any): InvoiceUiStatus {
 }
 
 function statusLabel(itemOrStatus: any) {
+  if (typeof itemOrStatus === "object" && isViesTechnicalError(itemOrStatus)) {
+    return "🟡 VIES occupato";
+  }
+
   const normalized = normalizeStatus(itemOrStatus);
   if (normalized === "completed") return "🟢 Approvata";
   if (normalized === "rejected") return "Rifiutata";
@@ -198,6 +238,10 @@ function statusLabel(itemOrStatus: any) {
 }
 
 function statusTone(itemOrStatus: any): "success" | "danger" | "warning" | "info" {
+  if (typeof itemOrStatus === "object" && isViesTechnicalError(itemOrStatus)) {
+    return "warning";
+  }
+
   const normalized = normalizeStatus(itemOrStatus);
   if (normalized === "completed") return "success";
   if (normalized === "rejected") return "danger";
@@ -265,7 +309,7 @@ function missingFields(item: any) {
   }
 
   if (country && country !== "IT" && item.viesValid !== true) {
-    missing.push("VIES non valido/da controllare");
+    missing.push(isViesTechnicalError(item) ? "VIES occupato/cliente da assistere" : "VIES non valido/da controllare");
   }
 
   return missing;
@@ -566,9 +610,10 @@ export default function InvoiceRequestsPage() {
                         <h2>Controlli fiscali</h2>
 
                         <Read label="VIES controllato" value={item.viesChecked ? "Sì" : "No"} />
-                        <Read label="VIES valido" value={item.viesValid ? "Sì" : "—"} />
+                        <Read label="Esito VIES" value={viesOutcomeLabel(item)} />
                         <Read label="Azienda VIES" value={item.viesCompanyName || "—"} />
-                        <Read label="Indirizzo VIES" value={item.viesAddress || "—"} multiline />
+                        <Read label="Indirizzo VIES" value={isViesTechnicalError(item) ? "—" : item.viesAddress || "—"} multiline />
+                        <Read label="Note VIES" value={viesAdminNote(item)} multiline />
                         <Read label="Reverse charge" value={item.reverseCharge ? "Sì" : "—"} />
                         <Read label="Tax exempt" value={item.taxExemptApplied ? "Sì" : "—"} />
                       </section>

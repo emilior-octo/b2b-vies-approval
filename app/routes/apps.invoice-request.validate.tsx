@@ -46,6 +46,31 @@ function errorMessage(error: any) {
     return String(error);
   }
 }
+function isViesBusyError(error: any) {
+  const message = errorMessage(error).toUpperCase();
+
+  return (
+    message.includes("MS_MAX_CONCURRENT_REQ") ||
+    message.includes("MS_UNAVAILABLE") ||
+    message.includes("SERVICE_UNAVAILABLE") ||
+    message.includes("TIMEOUT") ||
+    message.includes("ETIMEDOUT") ||
+    message.includes("ECONNRESET") ||
+    message.includes("ECONNABORTED") ||
+    message.includes("EAI_AGAIN")
+  );
+}
+
+function viesBusyCustomerMessage(locale: string) {
+  return locale === "it"
+    ? "VIES momentaneamente occupato. Richiesta fattura registrata: completa il checkout e, se ti serve reverse charge, contatta l’assistenza."
+    : "VIES is temporarily busy. Your invoice request was saved: complete checkout and contact support if you need reverse charge.";
+}
+
+function viesBusyAdminNote(error: any) {
+  return `Errore tecnico VIES: ${errorMessage(error)}`;
+}
+
 
 async function graphQL(admin: any, query: string, variables: any = {}) {
   const response = await admin.graphql(query, { variables });
@@ -862,8 +887,11 @@ export async function action({ request }: ActionFunctionArgs) {
         pendingManualReview = true;
       }
     } catch (error) {
+      const technicalBusy = isViesBusyError(error);
+
       console.error("[Invoice Request] VIES SOAP check failed", {
         error: errorMessage(error),
+        technicalBusy,
         countryCode,
         vatNumber,
         companyName,
@@ -872,10 +900,11 @@ export async function action({ request }: ActionFunctionArgs) {
 
       status = "pending_review";
       pendingManualReview = true;
-      viesChecked = true;
+      viesChecked = false;
       viesValid = null;
       reverseCharge = false;
       taxExemptCustomerPrepared = false;
+      viesAddress = viesBusyAdminNote(error);
     }
 
     if (reverseCharge && customerEmail) {
@@ -928,6 +957,13 @@ export async function action({ request }: ActionFunctionArgs) {
 
 
 
+    const viesTechnicalError = Boolean(
+      pendingManualReview &&
+        viesChecked === false &&
+        viesValid === null &&
+        String(viesAddress || "").toUpperCase().includes("ERRORE TECNICO VIES")
+    );
+
     return json({
       ok: true,
       invoiceRequestId: invoiceRequest.id,
@@ -944,12 +980,15 @@ export async function action({ request }: ActionFunctionArgs) {
       taxExemptCustomerPrepared,
       mustUseSameEmailAtCheckout: Boolean(reverseCharge && customerEmail),
       pendingManualReview,
+      viesTechnicalError,
       shopifySyncError: shopifySyncError || undefined,
-      message: pendingManualReview
-        ? locale === "it"
-          ? "Richiesta salvata per verifica manuale. Controlleremo il VAT prima della fatturazione."
-          : "Invoice request saved for manual review. We will check the VAT before invoicing."
-        : shopifySyncError
+      message: viesTechnicalError
+        ? viesBusyCustomerMessage(locale)
+        : pendingManualReview
+          ? locale === "it"
+            ? "Richiesta salvata per verifica manuale. Controlleremo il VAT prima della fatturazione."
+            : "Invoice request saved for manual review. We will check the VAT before invoicing."
+          : shopifySyncError
           ? locale === "it"
             ? `VAT valido, ma preparazione reverse charge non completata: ${shopifySyncError}`
             : `VAT valid, but reverse charge preparation was not completed: ${shopifySyncError}`
