@@ -85,26 +85,27 @@ function cleanViesValue(value: string) {
   return text;
 }
 
-function normalizeVatForCountry(vatNumber: string, billingCountry?: string) {
-  let raw = normalizeVat(vatNumber);
+function normalizeVatInputValueForCountry(vatNumber: string, billingCountry?: string) {
   const country = normalizeCountry(billingCountry || "");
+  const raw = normalizeVat(vatNumber);
 
-  if (!raw) return raw;
+  if (!raw) return "";
 
-  const hasCountryPrefix = /^[A-Z]{2}/.test(raw);
-
-  if (!hasCountryPrefix && country) {
-    raw = `${country}${raw}`;
+  if (country && raw.startsWith(country)) {
+    return raw.slice(2);
   }
 
-  if (country === "AT") {
-    if (/^ATU/.test(raw)) return raw;
-    if (/^AT/.test(raw)) return `ATU${raw.slice(2).replace(/^U/, "")}`;
-    if (/^U/.test(raw)) return `AT${raw}`;
-    return `ATU${raw}`;
-  }
+  return raw.replace(/^[A-Z]{2}/, "");
+}
 
-  return raw;
+function normalizeVatForCountry(vatNumber: string, billingCountry?: string) {
+  const country = normalizeCountry(billingCountry || "");
+  const cleanVat = normalizeVatInputValueForCountry(vatNumber, country);
+
+  if (!cleanVat) return "";
+  if (!country) return cleanVat;
+
+  return `${country}${cleanVat}`;
 }
 
 function shouldApplyReverseCharge({
