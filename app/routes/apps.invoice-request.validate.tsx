@@ -91,6 +91,15 @@ function normalizeVatInputValueForCountry(vatNumber: string, billingCountry?: st
 
   if (!raw) return "";
 
+  // Austria is the only VIES exception here:
+  // countryCode = AT, VAT number prefix = ATU.
+  if (country === "AT") {
+    return raw
+      .replace(/^ATU/, "")
+      .replace(/^AT/, "")
+      .replace(/^U/, "");
+  }
+
   if (country && raw.startsWith(country)) {
     return raw.slice(2);
   }
@@ -104,6 +113,10 @@ function normalizeVatForCountry(vatNumber: string, billingCountry?: string) {
 
   if (!cleanVat) return "";
   if (!country) return cleanVat;
+
+  if (country === "AT") {
+    return `ATU${cleanVat}`;
+  }
 
   return `${country}${cleanVat}`;
 }
@@ -361,6 +374,7 @@ async function createOrPrepareInvoiceCustomer({
           email,
           ...customerNamesFromCompanyOrEmail(companyName, email),
           note: `Invoice request company invoice - ${cleanViesText(companyName) || email}`,
+          taxExempt,
           tags,
         },
       },
@@ -381,10 +395,18 @@ async function createOrPrepareInvoiceCustomer({
   });
   await addCustomerTags(admin, customer.id, tags);
 
-  return {
+  const refreshedCustomer = await findCustomerByEmail(admin, email);
+  const finalCustomer = {
     ...customer,
     ...(updatedCustomer || {}),
+    ...(refreshedCustomer || {}),
   };
+
+  if (taxExempt && finalCustomer?.taxExempt !== true) {
+    throw new Error("VIES valido, ma Shopify non ha confermato taxExempt=true sul cliente.");
+  }
+
+  return finalCustomer;
 }
 
 function cleanViesText(value: string | null | undefined) {
