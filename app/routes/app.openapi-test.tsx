@@ -31,6 +31,8 @@ export async function action({ request }: ActionFunctionArgs) {
         dataKind: Array.isArray(body?.data) ? "array" : typeof body?.data,
         fields: record && typeof record === "object" ? Object.keys(record) : [],
         hasName: Boolean(record?.companyName || record?.name || record?.companyDetails?.companyName),
+        companyName: String(record?.companyName || record?.name || record?.companyDetails?.companyName || ""),
+        vatMatches: String(record?.vatCode || "").replace(/^IT/i, "") === vat,
         closed: record?.taxCodeCeased ?? record?.cessata ?? "unknown",
         activityStatus: record?.activityStatus ?? record?.companyStatus?.activityStatus?.code ?? "unknown",
         message: response.ok ? "" : String(body?.message || "Provider error").slice(0,150),
