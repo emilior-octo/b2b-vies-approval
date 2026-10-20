@@ -19,7 +19,20 @@ export async function action({ request }: ActionFunctionArgs) {
   if (!token) return { error: "OPENAPI_COMPANY_TOKEN non configurato su Render." };
   const host = sandbox ? "test.company.openapi.com" : "company.openapi.com";
   const results = [];
-  const normalize = (value: string) => value.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/&/g, " and ").replace(/\b(s\\.r\\.l\\.|srl|spa|s\\.p\\.a\\.|snc|s\\.n\\.c\\.|sas|s\\.a\\.s\\.|sapa|s\\.a\\.p\\.a\\.|societa|soc|benefit|unipersonale|unip|italia|italy)\b/g, "").replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim();
+  const normalize = (name: string) => {
+  return String(name || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/&/g, " and ")
+    .replace(
+      /\b(s\.r\.l\.|srl|spa|s\.p\.a\.|snc|s\.n\.c\.|sas|s\.a\.s\.|sapa|s\.a\.p\.a\.|societa|soc|benefit|unipersonale|unip|italia|italy)\b/g,
+      "",
+    )
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  };
   const similarity = (a: string, b: string) => {
     if (!a || !b) return 0;
     if (a === b) return 100;
