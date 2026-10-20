@@ -183,6 +183,33 @@ async function checkVatVies(vatNumber: string) {
   };
 }
 
+async function verifyItalianVatWithOpenapi(vat: string) {
+  const token = process.env.OPENAPI_COMPANY_TOKEN;
+  if (!token) throw new Error("Missing Openapi token");
+  const number = normalizeVat(vat).replace(/^IT/, "");
+  if (!/^\d{11}$/.test(number)) return { status: "invalid_format", name: "" };
+  const read = async (resource: string) => {
+    const res = await fetch("https://company.openapi.com/" + resource + "/" + number, {
+      headers: { Authorization: "Bearer " + token, Accept: "application/json" },
+      signal: AbortSignal.timeout(12000),
+    });
+    if (!res.ok) throw new Error("Openapi " + resource + " HTTP " + res.status);
+    const body = await res.json();
+    if (body?.success !== true || !body.data) throw new Error("Openapi incomplete response");
+    const value = Array.isArray(body.data) ? (body.data.length === 1 ? body.data[0] : null) : body.data;
+    if (!value || typeof value !== "object") throw new Error("Openapi ambiguous response");
+    return value;
+  };
+  const nameRecord = await read("IT-name");
+  const name = String(nameRecord.companyName || nameRecord.name || nameRecord.companyDetails?.companyName || "").trim();
+  const registeredVat = String(nameRecord.vatCode || nameRecord.companyDetails?.vatCode || "").replace(/^IT/i, "");
+  if (!name || (registeredVat && registeredVat !== number)) throw new Error("Openapi company identity inconclusive");
+  const statusRecord = await read("IT-closed");
+  const closed = statusRecord.taxCodeCeased ?? statusRecord.cessata;
+  if (typeof closed !== "boolean") throw new Error("Openapi company status inconclusive");
+  return { status: closed ? "closed" : "not_closed", name };
+}
+
 function validateBillingData(payload: any) {
   const billingCountry = normalizeCountry(payload.billingCountry ?? "");
   const pec = normalizePec(payload.pec ?? "");
@@ -828,32 +855,42 @@ export async function action({ request }: ActionFunctionArgs) {
     const acceptsMissingViesName =
       VIES_NAME_UNAVAILABLE_COUNTRIES.includes(vies.countryCode);
 
-    const matchScore = viesCompanyName
-      ? calculateMatchScore(submittedCompanyName, viesCompanyName)
+    const isItalian = billingValidation.billingCountry === "IT" && vies.countryCode === "IT";
+    let national: { status: string; name: string } | null = null;
+    if (isItalian && !vies.valid) {
+      try {
+        national = await verifyItalianVatWithOpenapi(vatNumber);
+      } catch (e) {
+        console.error("[B2B] National VAT verification requires review", e);
+      }
+    }
+    const companyNameVerified = national?.status === "not_closed" ? national.name : viesCompanyName;
+    const matchScore = companyNameVerified
+      ? calculateMatchScore(submittedCompanyName, companyNameVerified)
       : null;
 
     let decision = "pending_review";
     let tagsToApply = ["b2b_pending_review"];
     let viesStatus = vies.valid ? "valid" : "invalid";
 
-    if (!vies.valid) {
+    if (!vies.valid && !isItalian) {
       decision = "rejected";
       tagsToApply = ["b2b_rejected"];
+    } else if (isItalian && !vies.valid) {
+      if (national?.status === "not_closed" && (matchScore ?? 0) >= AUTO_APPROVE_MATCH_THRESHOLD) {
+        decision = "approved";
+        tagsToApply = ["b2b_customer", "vat_verified", "b2b_auto_approved"];
+      } else if (national?.status === "closed" || national?.status === "invalid_format") {
+        decision = "rejected";
+        tagsToApply = ["b2b_rejected"];
+      }
     } else if (!viesCompanyName && acceptsMissingViesName) {
       decision = "approved";
-      tagsToApply = [
-        "b2b_customer",
-        "vat_verified",
-        "b2b_auto_approved",
-      ];
+      tagsToApply = ["b2b_customer", "vat_verified", "b2b_auto_approved"];
       viesStatus = "valid_name_unavailable";
     } else if ((matchScore ?? 0) >= AUTO_APPROVE_MATCH_THRESHOLD) {
       decision = "approved";
-      tagsToApply = [
-        "b2b_customer",
-        "vat_verified",
-        "b2b_auto_approved",
-      ];
+      tagsToApply = ["b2b_customer", "vat_verified", "b2b_auto_approved"];
     }
 
     const metafieldsToWrite = {
@@ -864,6 +901,8 @@ export async function action({ request }: ActionFunctionArgs) {
       "b2b.vies_address": viesAddress,
       "b2b.vies_match_score": matchScore === null ? "" : String(matchScore),
       "b2b.vies_status": viesStatus,
+      "b2b.national_vat_status": national?.status || (isItalian && !vies.valid ? "unavailable" : "not_checked"),
+      "b2b.national_company_name": national?.name || "",
       "b2b.verified_at": new Date().toISOString(),
       "b2b.company_name_submitted": submittedCompanyName,
       "b2b.billing_country": billingValidation.billingCountry,
@@ -882,7 +921,7 @@ export async function action({ request }: ActionFunctionArgs) {
         pec: billingValidation.pec || null,
         codiceDestinatario: billingValidation.codiceDestinatario || null,
         viesValid: vies.valid,
-        viesCompanyName: viesCompanyName || submittedCompanyName,
+        viesCompanyName: viesCompanyName || null,
         viesAddress: viesAddress,
         viesCountryCode: vies.countryCode,
         viesVatNumber: vies.vatNumber,
@@ -898,7 +937,7 @@ export async function action({ request }: ActionFunctionArgs) {
       decision,
       tagsToApply,
       metafieldsToWrite,
-      vies,
+      vies: national?.status === "not_closed" ? { ...vies, companyName: national.name } : vies,
       billingValidation,
     });
 
@@ -924,6 +963,7 @@ export async function action({ request }: ActionFunctionArgs) {
         email,
       },
       vies,
+      national: national || undefined,
       normalized: {
         submittedCompanyName: normalizeCompanyName(submittedCompanyName),
         viesCompanyName: normalizeCompanyName(viesCompanyName),
