@@ -188,26 +188,28 @@ async function verifyItalianVatWithOpenapi(vat: string) {
   if (!token) throw new Error("Missing Openapi token");
   const number = normalizeVat(vat).replace(/^IT/, "");
   if (!/^\d{11}$/.test(number)) return { status: "invalid_format", name: "" };
-  const read = async (resource: string) => {
-    const res = await fetch("https://company.openapi.com/" + resource + "/" + number, {
-      headers: { Authorization: "Bearer " + token, Accept: "application/json" },
-      signal: AbortSignal.timeout(12000),
-    });
-    if (!res.ok) throw new Error("Openapi " + resource + " HTTP " + res.status);
-    const body = await res.json();
-    if (body?.success !== true || !body.data) throw new Error("Openapi incomplete response");
-    const value = Array.isArray(body.data) ? (body.data.length === 1 ? body.data[0] : null) : body.data;
-    if (!value || typeof value !== "object") throw new Error("Openapi ambiguous response");
-    return value;
+
+  const response = await fetch("https://company.openapi.com/IT-start/" + number, {
+    headers: { Authorization: "Bearer " + token, Accept: "application/json" },
+    signal: AbortSignal.timeout(12000),
+  });
+  if (!response.ok) throw new Error("Openapi IT-start HTTP " + response.status);
+  const body = await response.json();
+  if (body?.success !== true || !Array.isArray(body.data) || body.data.length !== 1) {
+    throw new Error("Openapi IT-start incomplete or ambiguous response");
+  }
+  const record = body.data[0];
+  const companyName = String(record?.companyName || "").trim();
+  const registeredVat = String(record?.vatCode || "").replace(/^IT/i, "");
+  if (!companyName || registeredVat !== number) {
+    throw new Error("Openapi IT-start company identity inconclusive");
+  }
+  const activityStatus = String(record?.activityStatus || "").trim().toUpperCase();
+  return {
+    status: activityStatus === "ATTIVA" ? "active"
+      : activityStatus === "CESSATA" ? "closed" : "review",
+    name: companyName,
   };
-  const nameRecord = await read("IT-name");
-  const name = String(nameRecord.companyName || nameRecord.name || nameRecord.companyDetails?.companyName || "").trim();
-  const registeredVat = String(nameRecord.vatCode || nameRecord.companyDetails?.vatCode || "").replace(/^IT/i, "");
-  if (!name || (registeredVat && registeredVat !== number)) throw new Error("Openapi company identity inconclusive");
-  const statusRecord = await read("IT-closed");
-  const closed = statusRecord.taxCodeCeased ?? statusRecord.cessata;
-  if (typeof closed !== "boolean") throw new Error("Openapi company status inconclusive");
-  return { status: closed ? "closed" : "not_closed", name };
 }
 
 function validateBillingData(payload: any) {
@@ -864,7 +866,7 @@ export async function action({ request }: ActionFunctionArgs) {
         console.error("[B2B] National VAT verification requires review", e);
       }
     }
-    const companyNameVerified = national?.status === "not_closed" ? national.name : viesCompanyName;
+    const companyNameVerified = national?.status === "active" ? national.name : viesCompanyName;
     const matchScore = companyNameVerified
       ? calculateMatchScore(submittedCompanyName, companyNameVerified)
       : null;
@@ -877,7 +879,7 @@ export async function action({ request }: ActionFunctionArgs) {
       decision = "rejected";
       tagsToApply = ["b2b_rejected"];
     } else if (isItalian && !vies.valid) {
-      if (national?.status === "not_closed" && (matchScore ?? 0) >= AUTO_APPROVE_MATCH_THRESHOLD) {
+      if (national?.status === "active" && (matchScore ?? 0) >= AUTO_APPROVE_MATCH_THRESHOLD) {
         decision = "approved";
         tagsToApply = ["b2b_customer", "vat_verified", "b2b_auto_approved"];
       } else if (national?.status === "closed" || national?.status === "invalid_format") {
@@ -937,7 +939,7 @@ export async function action({ request }: ActionFunctionArgs) {
       decision,
       tagsToApply,
       metafieldsToWrite,
-      vies: national?.status === "not_closed" ? { ...vies, companyName: national.name } : vies,
+      vies: national?.status === "active" ? { ...vies, companyName: national.name } : vies,
       billingValidation,
     });
 
