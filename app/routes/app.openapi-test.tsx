@@ -18,7 +18,7 @@ export async function action({ request }: ActionFunctionArgs) {
   if (!token) return { error: "OPENAPI_COMPANY_TOKEN non configurato su Render." };
   const host = sandbox ? "test.company.openapi.com" : "company.openapi.com";
   const results = [];
-  for (const endpoint of ["IT-name", "IT-closed"]) {
+  for (const endpoint of ["IT-start"]) {
     try {
       const response = await fetch("https://" + host + "/" + endpoint + "/" + encodeURIComponent(vat), {
         headers: { Authorization: "Bearer " + token, Accept: "application/json" },
@@ -32,6 +32,7 @@ export async function action({ request }: ActionFunctionArgs) {
         fields: record && typeof record === "object" ? Object.keys(record) : [],
         hasName: Boolean(record?.companyName || record?.name || record?.companyDetails?.companyName),
         closed: record?.taxCodeCeased ?? record?.cessata ?? "unknown",
+        activityStatus: record?.activityStatus ?? record?.companyStatus?.activityStatus?.code ?? "unknown",
         message: response.ok ? "" : String(body?.message || "Provider error").slice(0,150),
       });
     } catch (err: any) {
@@ -48,7 +49,7 @@ export default function OpenapiDiagnostics() {
   return (
     <div style={{ padding: 24, maxWidth: 760 }}>
       <h1>Openapi Company – diagnostica sicura</h1>
-      <p>Solo lettura. Nessuna modifica a clienti Shopify. Le richieste in produzione possono consumare credito.</p>
+      <p>Test mirato IT-start: solo lettura, nessuna modifica a clienti Shopify. Una chiamata in produzione può consumare credito.</p>
       <Form method="post">
         <p><label>Partita IVA italiana <input name="vat" required pattern="[0-9]{11}" placeholder="11 cifre" /></label></p>
         <p><label>Ambiente <select name="environment" value={environment} onChange={(event) => setEnvironment(event.target.value)}><option value="sandbox">Sandbox gratuita</option><option value="production">Produzione (a consumo)</option></select></label></p>
