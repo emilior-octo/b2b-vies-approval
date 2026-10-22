@@ -630,14 +630,14 @@ async function bulkApproveAndSync(admin: any, where: any, note: string) {
 
 function calculateNationalMatch(left: string, right: string) {
   const normalize = (value: string) => String(value || "").normalize("NFD")
-    .replace(/[\\u0300-\\u036f]/g, "").toLowerCase().replace(/&/g, " and ")
-    .replace(/\\b(s\\.r\\.l\\.|srl|spa|s\\.p\\.a\\.|snc|s\\.n\\.c\\.|sas|s\\.a\\.s\\.|sapa|s\\.a\\.p\\.a\\.|societa|soc|benefit|unipersonale|unip|italia|italy)\\b/g, "")
-    .replace(/[^a-z0-9]+/g, " ").replace(/\\s+/g, " ").trim();
+    .replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/&/g, " and ")
+    .replace(/\b(s\.r\.l\.|srl|spa|s\.p\.a\.|snc|s\.n\.c\.|sas|s\.a\.s\.|sapa|s\.a\.p\.a\.|societa|soc|benefit|unipersonale|unip|italia|italy)\b/g, "")
+    .replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim();
   const a = normalize(left), b = normalize(right);
   if (!a || !b) return 0;
   if (a === b) return 100;
   if (a.includes(b) || b.includes(a)) return 95;
-  const x = a.replace(/\\s+/g, ""), y = b.replace(/\\s+/g, "");
+  const x = a.replace(/\s+/g, ""), y = b.replace(/\s+/g, "");
   const prev = Array.from({ length: y.length + 1 }, (_, i) => i);
   for (let i = 1; i <= x.length; i++) {
     let last = prev[0]; prev[0] = i;
