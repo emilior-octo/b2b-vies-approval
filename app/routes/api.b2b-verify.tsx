@@ -195,16 +195,26 @@ async function verifyItalianVatWithOpenapi(vat: string) {
   });
   if (!response.ok) throw new Error("Openapi IT-start HTTP " + response.status);
   const body = await response.json();
-  if (body?.success !== true || !Array.isArray(body.data) || body.data.length !== 1) {
-    throw new Error("Openapi IT-start incomplete or ambiguous response");
+  if (body?.success !== true || !Array.isArray(body.data) || body.data.length === 0) {
+    throw new Error("Openapi IT-start incomplete response");
   }
-  const record = body.data[0];
-  const companyName = String(record?.companyName || "").trim();
-  const registeredVat = String(record?.vatCode || "").replace(/^IT/i, "");
-  if (!companyName || registeredVat !== number) {
-    throw new Error("Openapi IT-start company identity inconclusive");
+  const records = body.data;
+  const validRecords = records.filter((record: any) =>
+    record && typeof record === "object" &&
+    String(record.vatCode || "").replace(/^IT/i, "") === number &&
+    String(record.companyName || "").trim()
+  );
+  if (validRecords.length !== records.length) {
+    throw new Error("Openapi IT-start contains mismatching identities");
   }
-  const activityStatus = String(record?.activityStatus || "").trim().toUpperCase();
+  const companyNames = new Set(validRecords.map((record: any) => normalizeCompanyName(String(record.companyName))));
+  if (companyNames.size !== 1 || companyNames.has("")) {
+    throw new Error("Openapi IT-start contains conflicting company names");
+  }
+  const statuses = new Set(validRecords.map((record: any) => String(record.activityStatus || "").trim().toUpperCase()).filter(Boolean));
+  if (statuses.size > 1) throw new Error("Openapi IT-start contains conflicting company statuses");
+  const activityStatus = [...statuses][0] || "";
+  const companyName = String(validRecords.find((record: any) => String(record.activityStatus || "").toUpperCase() === "ATTIVA")?.companyName || validRecords[0].companyName).trim();
   return {
     status: activityStatus === "ATTIVA" ? "active"
       : activityStatus === "CESSATA" ? "closed" : "review",
