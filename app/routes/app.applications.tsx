@@ -1362,6 +1362,32 @@ function ApplicationDetail({ app }: { app: any }) {
           </section>
 
           <section className="zbe-card">
+            <h2>Verifica nazionale Openapi</h2>
+            {normalizeCountry(app.billingCountry) === "IT" ? (
+              <>
+                <p>Controllo a consumo, non modifica lo stato della richiesta.</p>
+                <button type="button" className="zbe-button zbe-button--dark"
+                  disabled={nationalFetcher.state !== "idle"}
+                  onClick={() => nationalFetcher.submit({ id: app.id, intent: "verify_national" }, { method: "post" })}>
+                  {nationalFetcher.state !== "idle" ? "Verifica in corso..." : "Verifica nazionale"}
+                </button>
+                {nationalFetcher.data?.nationalError && <p role="alert">{nationalFetcher.data.nationalError}</p>}
+                {national && (
+                  <div style={{ marginTop: 12 }}>
+                    <Read label="Ragione sociale ufficiale" value={national.officialName || "-"} />
+                    <Read label="Stato attività" value={national.activityStatus} />
+                    <Read label="Partita IVA corrispondente" value={national.matchesVat ? "Sì" : "No"} />
+                    <Read label="Corrispondenza denominazione" value={national.nameScore === null ? "-" : national.nameScore + "%"} />
+                    <Badge tone={national.eligible ? "success" : "warning"}>
+                      {national.eligible ? "Verifica positiva" : "Revisione necessaria"}
+                    </Badge>
+                  </div>
+                )}
+              </>
+            ) : <p>Disponibile solo per l'Italia.</p>}
+          </section>
+
+          <section className="zbe-card">
             <h2>Shopify</h2>
 
             <Read label="Customer ID" value={app.shopifyCustomerId || "Non presente"} />
@@ -1619,7 +1645,7 @@ const styles = `
 
 .zbe-detail-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 14px;
 }
 
