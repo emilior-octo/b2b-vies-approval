@@ -676,12 +676,24 @@ export async function action({ request }: any) {
         headers: { Authorization: "Bearer " + token, Accept: "application/json" },
         signal: AbortSignal.timeout(12000),
       });
-      if (!response.ok) return { nationalError: "Openapi HTTP " + response.status };
       const body = await response.json();
-      if (body?.success !== true || !Array.isArray(body.data) || body.data.length !== 1) {
-        return { nationalError: "Risposta Openapi incompleta." };
+      if (!response.ok || body?.success !== true) {
+        const providerMessage = typeof body?.message === "string" ? body.message.slice(0, 220) : "";
+        return { nationalError: "Openapi HTTP " + response.status +
+          (providerMessage ? " – " + providerMessage : "") +
+          (body?.error ? " (errore " + String(body.error) + ")" : "") };
       }
-      const record = body.data[0];
+      const records = Array.isArray(body?.data) ? body.data : body?.data ? [body.data] : [];
+      if (records.length === 0) {
+        return { nationalError: "Nessun dato aziendale restituito da Openapi per questa partita IVA. Verifica manuale necessaria." };
+      }
+      if (records.length !== 1) {
+        return { nationalError: "Openapi ha restituito " + records.length + " risultati: impossibile identificare con certezza l'impresa." };
+      }
+      const record = records[0];
+      if (!record || typeof record !== "object") {
+        return { nationalError: "Risposta Openapi senza dati aziendali utilizzabili." };
+      }
       const officialName = String(record?.companyName || "").trim();
       const matchesVat = String(record?.vatCode || "").replace(/^IT/i, "") === vat;
       const nameScore = officialName ? calculateNationalMatch(application.companyNameSubmitted, officialName) : null;
