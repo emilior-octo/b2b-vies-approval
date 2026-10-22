@@ -1,4 +1,4 @@
-import { Form, useLoaderData } from "react-router";
+import { Form, useLoaderData, useFetcher } from "react-router";
 import { useMemo, useState } from "react";
 import type { CSSProperties } from "react";
 import { authenticate } from "../shopify.server";
@@ -628,12 +628,81 @@ async function bulkApproveAndSync(admin: any, where: any, note: string) {
   }
 }
 
+function calculateNationalMatch(left: string, right: string) {
+  const normalize = (value: string) => String(value || "").normalize("NFD")
+    .replace(/[\\u0300-\\u036f]/g, "").toLowerCase().replace(/&/g, " and ")
+    .replace(/\\b(s\\.r\\.l\\.|srl|spa|s\\.p\\.a\\.|snc|s\\.n\\.c\\.|sas|s\\.a\\.s\\.|sapa|s\\.a\\.p\\.a\\.|societa|soc|benefit|unipersonale|unip|italia|italy)\\b/g, "")
+    .replace(/[^a-z0-9]+/g, " ").replace(/\\s+/g, " ").trim();
+  const a = normalize(left), b = normalize(right);
+  if (!a || !b) return 0;
+  if (a === b) return 100;
+  if (a.includes(b) || b.includes(a)) return 95;
+  const x = a.replace(/\\s+/g, ""), y = b.replace(/\\s+/g, "");
+  const prev = Array.from({ length: y.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= x.length; i++) {
+    let last = prev[0]; prev[0] = i;
+    for (let j = 1; j <= y.length; j++) {
+      const old = prev[j];
+      prev[j] = Math.min(prev[j] + 1, prev[j - 1] + 1, last + (x[i - 1] === y[j - 1] ? 0 : 1));
+      last = old;
+    }
+  }
+  const chars = Math.round((1 - prev[y.length] / Math.max(x.length, y.length)) * 100);
+  const aa = new Set(a.split(" ")), bb = new Set(b.split(" "));
+  const words = Math.round(([...aa].filter(w => bb.has(w)).length / Math.max(aa.size, bb.size)) * 100);
+  return Math.max(chars, words);
+}
+
 export async function action({ request }: any) {
   const { admin } = await authenticate.admin(request);
 
   const formData = await request.formData();
   const intent = String(formData.get("intent") || "");
   const id = String(formData.get("id") || "");
+
+  if (intent === "verify_national") {
+    if (!id) return { nationalError: "ID richiesta mancante." };
+    const application = await db.b2BApplication.findUnique({ where: { id } });
+    if (!application) return { nationalError: "Richiesta non trovata." };
+    if (normalizeCountry(application.billingCountry) !== "IT") {
+      return { nationalError: "Verifica nazionale disponibile solo per partita IVA italiana." };
+    }
+    const vat = normalizeVat(application.vatNumberSubmitted).replace(/^IT/, "");
+    if (!/^\\d{11}$/.test(vat)) return { nationalError: "Formato partita IVA non valido." };
+    const token = process.env.OPENAPI_COMPANY_TOKEN;
+    if (!token) return { nationalError: "Token Openapi non configurato." };
+    try {
+      const response = await fetch("https://company.openapi.com/IT-start/" + vat, {
+        headers: { Authorization: "Bearer " + token, Accept: "application/json" },
+        signal: AbortSignal.timeout(12000),
+      });
+      if (!response.ok) return { nationalError: "Openapi HTTP " + response.status };
+      const body = await response.json();
+      if (body?.success !== true || !Array.isArray(body.data) || body.data.length !== 1) {
+        return { nationalError: "Risposta Openapi incompleta." };
+      }
+      const record = body.data[0];
+      const officialName = String(record?.companyName || "").trim();
+      const matchesVat = String(record?.vatCode || "").replace(/^IT/i, "") === vat;
+      const nameScore = officialName ? calculateNationalMatch(application.companyNameSubmitted, officialName) : null;
+      return { national: {
+        id, officialName, matchesVat,
+        activityStatus: String(record?.activityStatus || "SCONOSCIUTO"),
+        nameScore,
+        eligible: matchesVat && String(record?.activityStatus || "").toUpperCase() === "ATTIVA" && nameScore !== null && nameScore >= 70,
+      } };
+    } catch (error: any) {
+      return { nationalError: error?.message || "Errore Openapi." };
+    }
+  }
+
+  if (intent === "bulk_reset_to_pending") {
+    await db.b2BApplication.updateMany({
+      where: { status: { in: ["approved", "rejected"] } },
+      data: { status: "pending_review", approvedAt: null, rejectedAt: null },
+    });
+    return null;
+  }
 
   if (intent === "bulk_approve_pending") {
     await bulkApproveAndSync(
@@ -1172,6 +1241,8 @@ export default function ApplicationsPage() {
 }
 
 function ApplicationDetail({ app }: { app: any }) {
+  const nationalFetcher = useFetcher<any>();
+  const national = nationalFetcher.data?.national?.id === app.id ? nationalFetcher.data.national : null;
   return (
     <div className="zbe-detail">
       <Form method="post">
@@ -1184,10 +1255,10 @@ function ApplicationDetail({ app }: { app: any }) {
           </div>
 
           <div className="zbe-detail-head-actions">
-            <button name="intent" value="save" className="zbe-button zbe-button--grey">
+            <button name="intent" value="save_edits" className="zbe-button zbe-button--grey">
               Salva modifiche
             </button>
-            <button name="intent" value="approve" className="zbe-button zbe-button--green">
+            <button name="intent" value="approve_and_sync" className="zbe-button zbe-button--green">
               Approva + crea Company
             </button>
             <button name="intent" value="pending" className="zbe-button zbe-button--yellow">
@@ -1312,11 +1383,11 @@ function ApplicationDetail({ app }: { app: any }) {
         </div>
 
         <div className="zbe-bottom-actions">
-          <button name="intent" value="save" className="zbe-button zbe-button--grey">
+          <button name="intent" value="save_edits" className="zbe-button zbe-button--grey">
             Salva modifiche
           </button>
 
-          <button name="intent" value="approve" className="zbe-button zbe-button--green">
+          <button name="intent" value="approve_and_sync" className="zbe-button zbe-button--green">
             Approva + crea Company
           </button>
 
