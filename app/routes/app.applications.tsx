@@ -701,16 +701,26 @@ export async function action({ request }: any) {
           nameScore,
         };
       });
-      const candidate = candidates.length === 1 ? candidates[0] : null;
+      const allSameVat = candidates.every((candidate: any) => candidate.matchesVat);
+      const normalizedNames = new Set(candidates.map((candidate: any) =>
+        String(candidate.officialName || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+          .toLowerCase().replace(/[^a-z0-9]/g, "")
+      ));
+      const compatibleNames = normalizedNames.size === 1 && !normalizedNames.has("");
+      const knownStatuses = [...new Set(candidates.map((candidate: any) =>
+        candidate.activityStatus.trim().toUpperCase()
+      ).filter((status: string) => status !== "SCONOSCIUTO" && status !== ""))];
+      const consistent = allSameVat && compatibleNames && knownStatuses.length <= 1;
+      const selected = consistent
+        ? candidates.find((candidate: any) => candidate.activityStatus.toUpperCase() === "ATTIVA") || candidates[0]
+        : null;
       return { national: {
-        id,
-        candidates,
-        count: candidates.length,
-        officialName: candidate?.officialName || "",
-        activityStatus: candidate?.activityStatus || "AMBIGUO",
-        matchesVat: candidate?.matchesVat || false,
-        nameScore: candidate?.nameScore ?? null,
-        eligible: Boolean(candidate && candidate.matchesVat && candidate.activityStatus.toUpperCase() === "ATTIVA" && candidate.nameScore !== null && candidate.nameScore >= 70),
+        id, candidates, count: candidates.length, consistent,
+        officialName: selected?.officialName || "",
+        activityStatus: selected?.activityStatus || "AMBIGUO",
+        matchesVat: selected?.matchesVat || false,
+        nameScore: selected?.nameScore ?? null,
+        eligible: Boolean(selected && selected.matchesVat && selected.activityStatus.toUpperCase() === "ATTIVA" && selected.nameScore !== null && selected.nameScore >= 70),
       } };
     } catch (error: any) {
       return { nationalError: error?.message || "Errore Openapi." };
@@ -1395,7 +1405,7 @@ function ApplicationDetail({ app }: { app: any }) {
                 {nationalFetcher.data?.nationalError && <p role="alert">{nationalFetcher.data.nationalError}</p>}
                 {national && (
                   <div style={{ marginTop: 12 }}>
-                    <p><strong>{national.count} risultati Openapi</strong>{national.count > 1 ? " — risultati multipli: approvazione automatica non consentita." : ""}</p>
+                    <p><strong>{national.count} risultati Openapi</strong>{national.count > 1 ? (national.consistent ? " — duplicati coerenti, stessa azienda." : " — dati discordanti: revisione necessaria.") : ""}</p>
                     {national.candidates?.map((candidate: any, index: number) => (
                       <div key={index} style={{ border: "1px solid #ddd3aa", borderRadius: 12, padding: 12, marginBottom: 10, overflowWrap: "anywhere" }}>
                         <strong>Risultato {index + 1}</strong>
