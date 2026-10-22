@@ -668,7 +668,7 @@ export async function action({ request }: any) {
       return { nationalError: "Verifica nazionale disponibile solo per partita IVA italiana." };
     }
     const vat = normalizeVat(application.vatNumberSubmitted).replace(/^IT/, "");
-    if (!/^\\d{11}$/.test(vat)) return { nationalError: "Formato partita IVA non valido." };
+    if (!/^\d{11}$/.test(vat)) return { nationalError: "Formato partita IVA non valido." };
     const token = process.env.OPENAPI_COMPANY_TOKEN;
     if (!token) return { nationalError: "Token Openapi non configurato." };
     try {
