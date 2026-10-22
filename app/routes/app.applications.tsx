@@ -687,21 +687,30 @@ export async function action({ request }: any) {
       if (records.length === 0) {
         return { nationalError: "Nessun dato aziendale restituito da Openapi per questa partita IVA. Verifica manuale necessaria." };
       }
-      if (records.length !== 1) {
-        return { nationalError: "Openapi ha restituito " + records.length + " risultati: impossibile identificare con certezza l'impresa." };
-      }
-      const record = records[0];
-      if (!record || typeof record !== "object") {
-        return { nationalError: "Risposta Openapi senza dati aziendali utilizzabili." };
-      }
-      const officialName = String(record?.companyName || "").trim();
-      const matchesVat = String(record?.vatCode || "").replace(/^IT/i, "") === vat;
-      const nameScore = officialName ? calculateNationalMatch(application.companyNameSubmitted, officialName) : null;
+      const candidates = records.map((record: any) => {
+        const officialName = String(record?.companyName || "").trim();
+        const registeredVat = String(record?.vatCode || "").trim().toUpperCase();
+        const matchesVat = registeredVat.replace(/^IT/, "") === vat;
+        const nameScore = officialName ? calculateNationalMatch(application.companyNameSubmitted, officialName) : null;
+        return {
+          officialName,
+          registeredVat,
+          taxCode: String(record?.taxCode || "").trim(),
+          activityStatus: String(record?.activityStatus || "SCONOSCIUTO"),
+          matchesVat,
+          nameScore,
+        };
+      });
+      const candidate = candidates.length === 1 ? candidates[0] : null;
       return { national: {
-        id, officialName, matchesVat,
-        activityStatus: String(record?.activityStatus || "SCONOSCIUTO"),
-        nameScore,
-        eligible: matchesVat && String(record?.activityStatus || "").toUpperCase() === "ATTIVA" && nameScore !== null && nameScore >= 70,
+        id,
+        candidates,
+        count: candidates.length,
+        officialName: candidate?.officialName || "",
+        activityStatus: candidate?.activityStatus || "AMBIGUO",
+        matchesVat: candidate?.matchesVat || false,
+        nameScore: candidate?.nameScore ?? null,
+        eligible: Boolean(candidate && candidate.matchesVat && candidate.activityStatus.toUpperCase() === "ATTIVA" && candidate.nameScore !== null && candidate.nameScore >= 70),
       } };
     } catch (error: any) {
       return { nationalError: error?.message || "Errore Openapi." };
@@ -1386,10 +1395,18 @@ function ApplicationDetail({ app }: { app: any }) {
                 {nationalFetcher.data?.nationalError && <p role="alert">{nationalFetcher.data.nationalError}</p>}
                 {national && (
                   <div style={{ marginTop: 12 }}>
-                    <Read label="Ragione sociale ufficiale" value={national.officialName || "-"} />
-                    <Read label="Stato attività" value={national.activityStatus} />
-                    <Read label="Partita IVA corrispondente" value={national.matchesVat ? "Sì" : "No"} />
-                    <Read label="Corrispondenza denominazione" value={national.nameScore === null ? "-" : national.nameScore + "%"} />
+                    <p><strong>{national.count} risultati Openapi</strong>{national.count > 1 ? " — risultati multipli: approvazione automatica non consentita." : ""}</p>
+                    {national.candidates?.map((candidate: any, index: number) => (
+                      <div key={index} style={{ border: "1px solid #ddd3aa", borderRadius: 12, padding: 12, marginBottom: 10, overflowWrap: "anywhere" }}>
+                        <strong>Risultato {index + 1}</strong>
+                        <Read label="Ragione sociale ufficiale" value={candidate.officialName || "-"} />
+                        <Read label="Partita IVA registrata" value={candidate.registeredVat || "-"} />
+                        <Read label="Codice fiscale" value={candidate.taxCode || "-"} />
+                        <Read label="Stato attività" value={candidate.activityStatus} />
+                        <Read label="Partita IVA corrispondente" value={candidate.matchesVat ? "Sì" : "No"} />
+                        <Read label="Corrispondenza denominazione" value={candidate.nameScore === null ? "-" : candidate.nameScore + "%"} />
+                      </div>
+                    ))}
                     <Badge tone={national.eligible ? "success" : "warning"}>
                       {national.eligible ? "Verifica positiva" : "Revisione necessaria"}
                     </Badge>
