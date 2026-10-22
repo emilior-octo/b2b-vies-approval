@@ -1849,8 +1849,4 @@ const styles = `
     width: 100%;
   }
 }
-`;                <button className="zbe-button zbe-button--dark" type="button" disabled={nationalFetcher.state !== "idle"}
-                  onClick={() => nationalFetcher.submit({ id: app.id, intent: "verify_national" }, { method: "post" })}>
-                  {nationalFetcher.state !== "idle" ? "Verifica in corso..." : "Verifica nazionale Openapi"}
-                </button>
-
+`;
